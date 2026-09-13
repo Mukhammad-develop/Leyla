@@ -177,7 +177,6 @@ class HermesAdapter:
             completion = client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                temperature=0.7,
             )
             reply = completion.choices[0].message.content or ""
 
