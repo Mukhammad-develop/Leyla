@@ -26,47 +26,77 @@ from app.voice.stt import transcribe_voice
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Localised intro messages
+# Localised intro messages — warm, guiding, with real examples
 # ---------------------------------------------------------------------------
 INTRO_MESSAGES = {
     "ru": (
-        "👋 Привет! Я — Лейла, твой персональный ИИ-ассистент.\n\n"
-        "Представь, что я — человек за компьютером, который может "
-        "помочь тебе с повседневными задачами.\n\n"
-        "🧠 Я помню важные вещи, которые ты мне расскажешь\n"
-        "🧮 Я считаю и решаю задачи\n"
-        "🔎 Я ищу информацию\n"
-        "📝 Я пишу тексты\n"
-        "📋 Я помогаю с организацией дел\n"
-        "💻 Я помогаю как компьютерный ассистент\n\n"
-        "💬 Просто общайся со мной естественно. Не нужно учить "
-        "команды. Если хочешь что-то изменить — просто скажи!"
+        "👋 Привет! Меня зовут Лейла.\n"
+        "Я — ваш личный помощник, и я всегда здесь, чтобы помочь.\n\n"
+
+        "Вот что я умею — просто напишите или надиктуйте голосовым сообщением:\n\n"
+
+        "🧮  «Сколько будет 1580 × 12?»\n"
+        "💰  «Я потратил 45 000 на продукты и 12 000 на такси. Сколько осталось от 200 000?»\n"
+        "📝  «Напиши поздравление с днём рождения для коллеги»\n"
+        "🔎  «Расскажи, чем полезен зелёный чай»\n"
+        "📋  «Напомни, что мне нужно сделать сегодня: аптека, банк, позвонить маме»\n"
+        "🧠  «Запомни: мой врач — Иванов Пётр Сергеевич, приём в 15:00 в среду»\n"
+        "✉️  «Помоги написать письмо в школу»\n"
+        "🌐  «Переведи на английский: Здравствуйте, как дела?»\n\n"
+
+        "🎤 Можете просто записать голосовое сообщение — я пойму!\n\n"
+
+        "Не нужно учить никаких команд — общайтесь со мной как с человеком.\n"
+        "Я запоминаю важные вещи, которые вы мне расскажете.\n\n"
+
+        "Попробуйте прямо сейчас! Например, спросите:\n"
+        "«Что ты умеешь?» или «Сколько дней до Нового года?» 😊"
     ),
     "en": (
-        "👋 Hi! I'm Leyla, your personal AI assistant.\n\n"
-        "Imagine me as a person with access to a computer who can "
-        "help you with many everyday tasks.\n\n"
-        "🧠 I remember things you tell me\n"
-        "🧮 I calculate and solve problems\n"
-        "🔎 I research information\n"
-        "📝 I write texts\n"
-        "📋 I help organise your day\n"
-        "💻 I assist like a computer-savvy helper\n\n"
-        "💬 Just talk to me naturally. No commands to learn. "
-        "If you want to change something — just tell me!"
+        "👋 Hello! My name is Leyla.\n"
+        "I'm your personal assistant, and I'm always here to help.\n\n"
+
+        "Here's what I can do — just type or send a voice message:\n\n"
+
+        "🧮  \"What is 1580 × 12?\"\n"
+        "💰  \"I spent \$45 on groceries and \$12 on a taxi. How much is left from \$200?\"\n"
+        "📝  \"Write a birthday greeting for my friend\"\n"
+        "🔎  \"Tell me about the health benefits of green tea\"\n"
+        "📋  \"Remind me what I need to do today: pharmacy, bank, call mom\"\n"
+        "🧠  \"Remember this: my doctor is Dr. Smith, appointment Wednesday at 3 PM\"\n"
+        "✉️  \"Help me write an email to my landlord\"\n"
+        "🌐  \"Translate to Russian: Hello, how are you?\"\n\n"
+
+        "🎤 You can also just record a voice message — I'll understand!\n\n"
+
+        "No commands to learn — just talk to me like you would to a person.\n"
+        "I remember important things you tell me.\n\n"
+
+        "Try it right now! For example, ask me:\n"
+        "\"What can you do?\" or \"How many days until New Year?\" 😊"
     ),
     "uz": (
-        "👋 Salom! Men Leyla, sizning shaxsiy AI yordamchingizman.\n\n"
-        "Tasavvur qiling, men kompyuterga kirish huquqiga ega bo'lgan "
-        "va kundalik vazifalaringizda yordam beradigan insonman.\n\n"
-        "🧠 Men aytgan narsalaringizni eslab qolaman\n"
-        "🧮 Men hisoblayman va masalalarni yechaman\n"
-        "🔎 Men ma'lumot izlayman\n"
-        "📝 Men matnlar yozaman\n"
-        "📋 Men ishlaringizni tartibga solishda yordam beraman\n"
-        "💻 Men kompyuter yordamchisi sifatida xizmat qilaman\n\n"
-        "💬 Men bilan oddiy gaplashavering. Buyruqlarni yodlash "
-        "shart emas. Nimadir o'zgartirmoqchi bo'lsangiz — ayting!"
+        "👋 Salom! Mening ismim Leyla.\n"
+        "Men sizning shaxsiy yordamchingizman va har doim yordam berishga tayyorman.\n\n"
+
+        "Mana men nimalar qila olaman — shunchaki yozing yoki ovozli xabar yuboring:\n\n"
+
+        "🧮  «1580 × 12 necha bo'ladi?»\n"
+        "💰  «Oziq-ovqatga 450 000 va taksiga 120 000 sarfladim. 2 000 000 dan qancha qoldi?»\n"
+        "📝  «Do'stim uchun tug'ilgan kun tabrigi yoz»\n"
+        "🔎  «Yashil choyning foydalari haqida aytib ber»\n"
+        "📋  «Bugun nima qilishim kerakligini eslatib tur: dorixona, bank, oyimga qo'ng'iroq»\n"
+        "🧠  «Eslab qol: mening shifokorim — Aliyev Jasur, qabul chorshanba kuni soat 15:00 da»\n"
+        "✉️  \"Maktabga xat yozishda yordam ber\"\n"
+        "🌐  «Ruscha'ga tarjima qil: Assalomu alaykum, qalaysiz?»\n\n"
+
+        "🎤 Ovozli xabar ham yuborishingiz mumkin — men tushunaman!\n\n"
+
+        "Hech qanday buyruqlarni yodlash shart emas — men bilan oddiy gaplashing.\n"
+        "Men siz aytgan muhim narsalarni eslab qolaman.\n\n"
+
+        "Hoziroq sinab ko'ring! Masalan, so'rang:\n"
+        "«Sen nima qila olasan?» yoki «Yangi yilgacha necha kun qoldi?» 😊"
     ),
 }
 
