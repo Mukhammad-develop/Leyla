@@ -191,6 +191,30 @@ class TestConcurrency(unittest.TestCase):
         self.assertEqual(errors, [], f"Concurrency errors: {errors}")
 
 
+class TestReminders(unittest.TestCase):
+    """Timer and reminder creation and retrieval."""
+
+    @classmethod
+    def setUpClass(cls):
+        init_db()
+
+    def test_reminder_created_via_message(self):
+        from app.reminders.manager import get_pending_reminders, add_reminder, cancel_reminder
+        user, _ = get_or_create_user(600001)
+        adapter = HermesAdapter(user["hermes_profile"], telegram_user_id=600001, chat_id=600001)
+        resp = adapter.send_message("Remind me in 10 minutes to test", "en")
+        reminders = get_pending_reminders(600001)
+        self.assertEqual(len(reminders), 1)
+        self.assertEqual(reminders[0]["text"], "Test reminder")
+        self.assertEqual(reminders[0]["status"], "pending")
+
+        # Test cancellation
+        cancelled = cancel_reminder(600001, reminders[0]["id"])
+        self.assertTrue(cancelled)
+        reminders_after = get_pending_reminders(600001)
+        self.assertEqual(len(reminders_after), 0)
+
+
 def tearDownModule():
     shutil.rmtree(_temp_dir, ignore_errors=True)
 

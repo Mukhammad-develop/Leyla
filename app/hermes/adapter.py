@@ -1,12 +1,7 @@
 """
 Hermes adapter — bridges each Telegram user to an isolated
-OpenAI-backed profile with persistent memory and conversation history.
-
-In production the OpenAI client is reused (singleton per profile_id).
-A per-profile threading lock serializes state mutations so concurrent
-Telegram updates for the same user never corrupt files.
-
-File writes use atomic rename to prevent corruption on crash.
+OpenAI-backed profile with persistent memory, conversation history,
+and real timer / reminder scheduling.
 """
 
 import json
@@ -15,6 +10,10 @@ import os
 import re
 import tempfile
 import threading
+import time
+from datetime import datetime, timezone, timedelta
+
+from app.reminders.manager import add_reminder, get_pending_reminders, cancel_reminder
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +32,7 @@ def _get_user_lock(profile_id: str) -> threading.Lock:
 
 
 # ---------------------------------------------------------------------------
-# Singleton OpenAI client  (created once, reused for every message)
+# Singleton OpenAI client
 # ---------------------------------------------------------------------------
 _openai_client = None
 _openai_client_lock = threading.Lock()
@@ -45,7 +44,7 @@ def _get_openai_client():
     if _openai_client is not None:
         return _openai_client
     with _openai_client_lock:
-        if _openai_client is not None:          # double-check
+        if _openai_client is not None:
             return _openai_client
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
@@ -68,10 +67,24 @@ CONTEXT_WINDOW_TURNS = 20       # messages sent to the model
 
 
 class HermesAdapter:
-    """One adapter instance per incoming message.  Cheap to construct."""
+    """One adapter instance per incoming message."""
 
-    def __init__(self, profile_id: str):
+    def __init__(
+        self,
+        profile_id: str,
+        telegram_user_id: int | None = None,
+        chat_id: int | None = None,
+    ):
         self.profile_id = profile_id
+        if telegram_user_id is None:
+            try:
+                self.telegram_user_id = int(profile_id.replace("telegram_", ""))
+            except ValueError:
+                self.telegram_user_id = 0
+        else:
+            self.telegram_user_id = telegram_user_id
+
+        self.chat_id = chat_id or self.telegram_user_id
         self.data_dir = os.environ.get("DATA_DIR", "data")
         self.profile_dir = os.path.join(self.data_dir, "hermes_profiles", profile_id)
         os.makedirs(self.profile_dir, exist_ok=True)
@@ -100,9 +113,8 @@ class HermesAdapter:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(data, fh, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, path)       # atomic on POSIX
+            os.replace(tmp_path, path)
         except BaseException:
-            # Clean up the temp file if something goes wrong
             try:
                 os.unlink(tmp_path)
             except OSError:
@@ -111,36 +123,77 @@ class HermesAdapter:
 
     # ---- System prompt ----------------------------------------------------
 
-    @staticmethod
-    def _get_system_prompt(current_lang: str) -> str:
+    def _get_system_prompt(self, current_lang: str) -> str:
         name = {"ru": "Лейла", "en": "Leyla", "uz": "Laylo"}.get(current_lang, "Leyla")
-        return (
-            f"You are {name}, a highly capable personal AI assistant.\n"
+
+        now_utc = datetime.now(timezone.utc)
+        now_uz = now_utc.astimezone(timezone(timedelta(hours=5)))
+        now_ru = now_utc.astimezone(timezone(timedelta(hours=3)))
+
+        prompt = (
+            f"You are {name}, a highly capable, warm, and thoughtful personal AI assistant.\n"
             f"Your name is {name}.\n"
-            "Imagine yourself as a person who has access to a computer and can "
-            "help the user with everyday calculations, tracking expenses, "
-            "researching, writing, and organizing.\n\n"
+            "Imagine yourself as a helpful companion with a computer who assists the user with everyday "
+            "tasks, calculations, expenses, researching, writing, and organizing their day.\n\n"
+            f"CURRENT TIME & DATE:\n"
+            f"• UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"• Uzbekistan (UTC+5): {now_uz.strftime('%Y-%m-%d %H:%M:%S (%A)')}\n"
+            f"• Moscow (UTC+3): {now_ru.strftime('%Y-%m-%d %H:%M:%S (%A)')}\n\n"
             f"The user's current preferred language code is: '{current_lang}'.\n"
-            "You MUST respond in that language unless the user explicitly asks "
-            "you to switch.\n\n"
+            "You MUST respond primarily in that language unless the user asks to switch.\n\n"
             "BEHAVIOR & FORMATTING RULES:\n"
-            "• Do NOT repeat your name (e.g., do NOT start messages with 'Men Layloman' or 'Я Лейла') in every message. Only mention your name if asked, or when greeting for the very first time.\n"
-            "• Use emojis generously and naturally throughout your responses to make them warm, friendly, lively, and engaging (e.g. 😊, ✨, 💡, 📝, 🌸, 🎯, 👍, 💫, 💬, 🚀, ❤️, 📚, ☕).\n"
+            "• Do NOT repeat your name (e.g. do NOT start messages with 'Men Layloman' or 'Я Лейла') in every message. "
+            "Only mention your name if asked, or when greeting for the very first time.\n"
+            "• Use emojis generously and naturally throughout your responses to make them warm, friendly, lively, "
+            "and engaging (e.g. 😊, ✨, 💡, 📝, 🌸, 🎯, 👍, 💫, 💬, 🚀, ❤️, 📚, ☕, ⏰).\n"
             "• Use **bold** (double asterisks) for emphasis, section titles, and key terms.\n"
             "• Keep responses well-structured with bullet points, numbered lists, and clean spacing.\n\n"
+            "⏰ TIMERS & REMINDERS (NATIVE CAPABILITY):\n"
+            "• You HAVE full ability to set real timers, alarms, and reminders for the user!\n"
+            "• NEVER tell the user that you cannot set timers, alarms, or reminders. You CAN and MUST!\n"
+            "• When the user asks for a timer or reminder (e.g. 'Remind me in 10 minutes to take medicine', "
+            "'5 minutga taymer qo\\'y', 'Ertaga soat 08:00 da dori ichishni eslat', 'Напомни через полчаса выключить суп'):\n"
+            "  1. Calculate the exact delay in seconds from the current time.\n"
+            "     - 1 minute = 60\n"
+            "     - 5 minutes = 300\n"
+            "     - 10 minutes = 600\n"
+            "     - 1 hour = 3600\n"
+            "     - Specific time (e.g. at 18:00): calculate difference in seconds between the current local time and the target time.\n"
+            "  2. Append the tag `[REMINDER: <seconds> | <text to remind>]` at the end of your response.\n"
+            "     Examples:\n"
+            "     - User: '5 minutdan keyin suv ichishni eslat' -> Append `[REMINDER: 300 | Suv ichish]`\n"
+            "     - User: 'Поставь таймер на 15 минут' -> Append `[REMINDER: 900 | Время таймера вышло! ⏰]`\n"
+            "     - User: 'Remind me in 1 hour to check the oven' -> Append `[REMINDER: 3600 | Check the oven]`\n"
+            "  3. Warmly and clearly confirm to the user that the timer/reminder has been set, stating how long or what time it will alert them.\n"
+            "• To cancel a pending reminder if requested, append `[CANCEL_REMINDER: <id>]`.\n\n"
             "LANGUAGE SWITCHING RULES:\n"
             "• If the user EXPLICITLY asks to change the conversation language "
-            "(e.g. 'Speak English', 'Давай по-русски', "
-            "'Endi o\\'zbekcha gaplashamiz'), acknowledge the change in the "
-            "NEW language and append EXACTLY the tag "
-            "'[LANGUAGE_CHANGED_TO: <CODE>]' at the very end of your "
-            "response, where <CODE> is one of: ru, en, uz.\n"
+            "(e.g. 'Speak English', 'Давай по-русски', 'Endi o\\'zbekcha gaplashamiz'), "
+            "acknowledge the change in the NEW language and append EXACTLY the tag "
+            "'[LANGUAGE_CHANGED_TO: <CODE>]' at the very end of your response, where <CODE> is one of: ru, en, uz.\n"
             "• Do NOT emit this tag for any other reason.\n\n"
             "MEMORY RULES:\n"
-            "• When the user tells you a fact to remember, store it by "
-            "appending '[REMEMBER: <fact>]' to your response.\n"
+            "• When the user tells you a fact to remember, store it by appending '[REMEMBER: <fact>]' to your response.\n"
             "• Use the memory context below to personalise answers.\n"
         )
+
+        # Inject pending reminders if any exist
+        try:
+            pending = get_pending_reminders(self.telegram_user_id)
+            if pending:
+                now_ts = int(time.time())
+                rem_lines = []
+                for r in pending:
+                    diff = max(0, r["remind_at"] - now_ts)
+                    mins = diff // 60
+                    secs = diff % 60
+                    time_desc = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
+                    rem_lines.append(f"- ID {r['id']}: in ~{time_desc}: '{r['text']}'")
+                prompt += "\nActive Pending Reminders for this user:\n" + "\n".join(rem_lines) + "\n"
+        except Exception as e:
+            logger.debug("Could not load pending reminders for prompt: %s", e)
+
+        return prompt
 
     # ---- Public entry point -----------------------------------------------
 
@@ -153,12 +206,36 @@ class HermesAdapter:
 
             client = _get_openai_client()
             if client is None:
-                # Fallback for tests / missing key
                 response = self._mock_llm_response(message, current_lang, memory)
             else:
                 response = self._openai_response(
                     client, message, current_lang, history, memory,
                 )
+
+            # Process [REMINDER: <seconds> | <text>] tags
+            rem_matches = re.findall(r"\[REMINDER:\s*(\d+)\s*\|\s*(.+?)\]", response)
+            for delay_str, text_val in rem_matches:
+                try:
+                    delay_sec = int(delay_str)
+                    add_reminder(
+                        telegram_user_id=self.telegram_user_id,
+                        chat_id=self.chat_id,
+                        delay_seconds=delay_sec,
+                        text=text_val.strip(),
+                        language=current_lang,
+                    )
+                except Exception as exc:
+                    logger.error("Failed to schedule reminder from response: %s", exc)
+            response = re.sub(r"\[REMINDER:\s*\d+\s*\|\s*.+?\]", "", response).strip()
+
+            # Process [CANCEL_REMINDER: <id>] tags
+            cancel_matches = re.findall(r"\[CANCEL_REMINDER:\s*(\d+)\]", response)
+            for cid_str in cancel_matches:
+                try:
+                    cancel_reminder(self.telegram_user_id, int(cid_str))
+                except Exception as exc:
+                    logger.error("Failed to cancel reminder: %s", exc)
+            response = re.sub(r"\[CANCEL_REMINDER:\s*\d+\]", "", response).strip()
 
             history.append({"role": "user", "content": message})
             history.append({"role": "assistant", "content": response})
@@ -204,8 +281,7 @@ class HermesAdapter:
 
     # ---- Mock (used in tests / when no API key) ---------------------------
 
-    @staticmethod
-    def _mock_llm_response(message, current_lang, memory):
+    def _mock_llm_response(self, message, current_lang, memory):
         low = message.lower()
         if "speak english" in low:
             return "Okay, I will speak English now. [LANGUAGE_CHANGED_TO: en]"
@@ -213,6 +289,8 @@ class HermesAdapter:
             return "Хорошо, перехожу на русский. [LANGUAGE_CHANGED_TO: ru]"
         if "o'zbekcha" in low or "o'zbek" in low:
             return "Xo'p, endi o'zbekchada gaplashaman. [LANGUAGE_CHANGED_TO: uz]"
+        if "remind me in" in low or "taymer" in low or "напомни" in low or "eslat" in low:
+            return "Timer set! [REMINDER: 10 | Test reminder]"
         if "my name is" in low:
             name = message[low.find("my name is") + len("my name is"):].strip()
             memory.append({"type": "name", "value": name})

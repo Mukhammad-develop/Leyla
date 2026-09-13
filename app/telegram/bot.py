@@ -23,6 +23,7 @@ from app.users.manager import (
     update_user_language,
 )
 from app.voice.stt import transcribe_voice
+from app.reminders.scheduler import start_reminder_scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -201,7 +202,7 @@ def format_telegram_html(text: str) -> str:
 def _process_and_reply(bot, chat_id, telegram_id, user, text: str) -> None:
     """Common logic: send text through Hermes and reply with the result."""
     bot.send_chat_action(chat_id, "typing")
-    hermes = HermesAdapter(user["hermes_profile"])
+    hermes = HermesAdapter(user["hermes_profile"], telegram_user_id=telegram_id, chat_id=chat_id)
     response = hermes.send_message(text, user["language"])
 
     # Intercept language-change tags
@@ -237,6 +238,9 @@ def run_bot() -> None:
         return
 
     bot = TeleBot(token, threaded=True, num_threads=4)
+
+    # Start the background reminder & timer scheduler
+    start_reminder_scheduler(bot)
 
     # -- /start -------------------------------------------------------------
     @bot.message_handler(commands=["start"])

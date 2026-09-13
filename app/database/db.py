@@ -39,6 +39,22 @@ def init_db() -> None:
                     status           TEXT NOT NULL DEFAULT 'active'
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS reminders (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    telegram_user_id INTEGER NOT NULL,
+                    chat_id          INTEGER NOT NULL,
+                    remind_at        INTEGER NOT NULL,
+                    text             TEXT NOT NULL,
+                    language         TEXT NOT NULL DEFAULT 'en',
+                    status           TEXT NOT NULL DEFAULT 'pending',
+                    created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_reminders_pending 
+                ON reminders (status, remind_at)
+            """)
             conn.commit()
 
 
