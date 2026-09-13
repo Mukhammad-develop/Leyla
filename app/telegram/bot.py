@@ -228,13 +228,8 @@ def run_bot() -> None:
                 return
 
             update_last_seen(telegram_id)
-            lang = user["language"]
 
-            # Show "listening" feedback
-            status_msg = bot.send_message(
-                message.chat.id,
-                VOICE_TRANSCRIBING_MESSAGES.get(lang, VOICE_TRANSCRIBING_MESSAGES["en"]),
-            )
+            bot.send_chat_action(message.chat.id, "typing")
 
             # Download the .ogg file from Telegram
             file_info = bot.get_file(message.voice.file_id)
@@ -252,13 +247,8 @@ def run_bot() -> None:
                 if tmp_path and os.path.exists(tmp_path):
                     os.unlink(tmp_path)
 
-            # Delete the "listening" status message
-            try:
-                bot.delete_message(message.chat.id, status_msg.message_id)
-            except Exception:
-                pass
-
             if not transcribed_text:
+                lang = user["language"]
                 bot.send_message(
                     message.chat.id,
                     VOICE_FAILED_MESSAGES.get(lang, VOICE_FAILED_MESSAGES["en"]),
