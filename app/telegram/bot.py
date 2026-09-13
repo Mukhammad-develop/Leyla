@@ -5,6 +5,7 @@ The TeleBot instance is created lazily inside run_bot() so that the
 token is guaranteed to be available (load_dotenv has already run).
 """
 
+import html
 import logging
 import os
 import re
@@ -119,11 +120,82 @@ VOICE_FAILED_MESSAGES = {
 }
 
 
-def split_message(text: str, chunk_size: int = 4000) -> list[str]:
-    """Split a long response into Telegram-safe chunks (limit 4096)."""
+def split_message(text: str, max_chars: int = 3500) -> list[str]:
+    """Split a long response into Telegram-safe chunks (limit 4096), breaking nicely on newlines."""
     if not text:
         return []
-    return [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
+    if len(text) <= max_chars:
+        return [text]
+
+    chunks = []
+    lines = text.split("\n")
+    current_chunk = []
+    current_len = 0
+
+    for line in lines:
+        if current_len + len(line) + 1 > max_chars:
+            if current_chunk:
+                chunks.append("\n".join(current_chunk))
+                current_chunk = []
+                current_len = 0
+            if len(line) > max_chars:
+                for i in range(0, len(line), max_chars):
+                    chunks.append(line[i : i + max_chars])
+                continue
+        current_chunk.append(line)
+        current_len += len(line) + 1
+
+    if current_chunk:
+        chunks.append("\n".join(current_chunk))
+    return chunks
+
+
+def format_telegram_html(text: str) -> str:
+    """Converts standard markdown (**bold**, *italic*, `code`, ```block```, etc.) to Telegram HTML."""
+    # 1. Code blocks
+    code_blocks = []
+    def save_code_block(match):
+        code_blocks.append(match.group(1))
+        return f"\x00CB{len(code_blocks)-1}\x00"
+
+    text = re.sub(r"```(?:[a-zA-Z0-9_-]+)?\n?(.*?)```", save_code_block, text, flags=re.DOTALL)
+
+    # 2. Inline code
+    inline_codes = []
+    def save_inline_code(match):
+        inline_codes.append(match.group(1))
+        return f"\x00IC{len(inline_codes)-1}\x00"
+
+    text = re.sub(r"`([^`]+)`", save_inline_code, text)
+
+    # 3. Escape HTML (&, <, > only, keep quotes and apostrophes for natural text)
+    text = html.escape(text, quote=False)
+
+    # 4. Links: [text](url)
+    text = re.sub(r"\[([^\]]+)\]\((https?://[^\s\)]+)\)", r'<a href="\2">\1</a>', text)
+
+    # 5. Headers: ### Header -> <b>Header</b>
+    text = re.sub(r"^#{1,6}\s*(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
+
+    # 6. Bold: **text** or __text__ -> <b>text</b>
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text, flags=re.DOTALL)
+
+    # 7. Italic: *text* or _text_ -> <i>text</i>
+    text = re.sub(r"(?<!\w)\*([^*\n]+?)\*(?!\w)", r"<i>\1</i>", text)
+    text = re.sub(r"(?<!\w)_([^_\n]+?)_(?!\w)", r"<i>\1</i>", text)
+
+    # 8. Strikethrough: ~~text~~ -> <s>text</s>
+    text = re.sub(r"~~(.+?)~~", r"<s>\1</s>", text, flags=re.DOTALL)
+
+    # 9. Restore inline code
+    for i, code in enumerate(inline_codes):
+        text = text.replace(f"\x00IC{i}\x00", f"<code>{html.escape(code, quote=False)}</code>")
+
+    # 10. Restore code blocks
+    for i, code in enumerate(code_blocks):
+        text = text.replace(f"\x00CB{i}\x00", f"<pre><code>{html.escape(code, quote=False)}</code></pre>")
+
+    return text
 
 
 def _process_and_reply(bot, chat_id, telegram_id, user, text: str) -> None:
@@ -142,7 +214,15 @@ def _process_and_reply(bot, chat_id, telegram_id, user, text: str) -> None:
 
     for chunk in split_message(response):
         if chunk.strip():
-            bot.send_message(chat_id, chunk)
+            formatted_chunk = format_telegram_html(chunk)
+            try:
+                bot.send_message(chat_id, formatted_chunk, parse_mode="HTML")
+            except Exception as exc:
+                logger.warning(
+                    "Failed to send HTML formatted message (%s). Sending plain text.",
+                    exc,
+                )
+                bot.send_message(chat_id, chunk)
 
 
 # ---------------------------------------------------------------------------
