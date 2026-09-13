@@ -76,7 +76,7 @@ INTRO_MESSAGES = {
         "\"What can you do?\" or \"How many days until New Year?\" 😊"
     ),
     "uz": (
-        "👋 Salom! Mening ismim Leyla.\n"
+        "👋 Salom! Mening ismim Laylo.\n"
         "Men sizning shaxsiy yordamchingizman va har doim yordam berishga tayyorman.\n\n"
 
         "Mana men nimalar qila olaman — shunchaki yozing yoki ovozli xabar yuboring:\n\n"

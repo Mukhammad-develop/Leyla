@@ -113,8 +113,10 @@ class HermesAdapter:
 
     @staticmethod
     def _get_system_prompt(current_lang: str) -> str:
+        name = {"ru": "Лейла", "en": "Leyla", "uz": "Laylo"}.get(current_lang, "Leyla")
         return (
-            "You are Leyla, a highly capable personal AI assistant.\n"
+            f"You are {name}, a highly capable personal AI assistant.\n"
+            f"Your name is {name} — always introduce yourself with this name.\n"
             "Imagine yourself as a person who has access to a computer and can "
             "help the user with everyday calculations, tracking expenses, "
             "researching, writing, and organizing.\n\n"
