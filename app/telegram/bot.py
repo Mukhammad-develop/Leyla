@@ -8,6 +8,7 @@ token is guaranteed to be available (load_dotenv has already run).
 import logging
 import os
 import re
+import tempfile
 import traceback
 
 from telebot import TeleBot
@@ -20,6 +21,7 @@ from app.users.manager import (
     update_last_seen,
     update_user_language,
 )
+from app.voice.stt import transcribe_voice
 
 logger = logging.getLogger(__name__)
 
@@ -69,9 +71,21 @@ INTRO_MESSAGES = {
 }
 
 UNSUPPORTED_CONTENT_MESSAGES = {
-    "ru": "Пока я могу работать только с текстовыми сообщениями. Напишите мне текстом! ✍️",
-    "en": "I can only work with text messages for now. Please type your message! ✍️",
-    "uz": "Hozircha faqat matnli xabarlar bilan ishlay olaman. Iltimos, matn yozing! ✍️",
+    "ru": "Пока я могу работать только с текстовыми и голосовыми сообщениями. Напишите или надиктуйте! ✍️🎤",
+    "en": "I can only work with text and voice messages for now. Please type or record a voice message! ✍️🎤",
+    "uz": "Hozircha faqat matnli va ovozli xabarlar bilan ishlay olaman. Iltimos, matn yozing yoki ovozli xabar yuboring! ✍️🎤",
+}
+
+VOICE_TRANSCRIBING_MESSAGES = {
+    "ru": "🎧 Слушаю ваше сообщение…",
+    "en": "🎧 Listening to your message…",
+    "uz": "🎧 Xabaringizni tinglayapman…",
+}
+
+VOICE_FAILED_MESSAGES = {
+    "ru": "❌ Не удалось распознать голосовое сообщение. Попробуйте ещё раз или напишите текстом.",
+    "en": "❌ Could not transcribe your voice message. Please try again or type your message.",
+    "uz": "❌ Ovozli xabarni aniqlab bo'lmadi. Iltimos, qaytadan urinib ko'ring yoki matn yozing.",
 }
 
 
@@ -80,6 +94,24 @@ def split_message(text: str, chunk_size: int = 4000) -> list[str]:
     if not text:
         return []
     return [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
+
+
+def _process_and_reply(bot, chat_id, telegram_id, user, text: str) -> None:
+    """Common logic: send text through Hermes and reply with the result."""
+    hermes = HermesAdapter(user["hermes_profile"])
+    response = hermes.send_message(text, user["language"])
+
+    # Intercept language-change tags
+    match = re.search(r"\[LANGUAGE_CHANGED_TO:\s*([a-z]{2})\]", response)
+    if match:
+        new_lang = match.group(1)
+        if new_lang in ("ru", "en", "uz"):
+            update_user_language(telegram_id, new_lang)
+        response = response.replace(match.group(0), "").strip()
+
+    for chunk in split_message(response):
+        if chunk.strip():
+            bot.send_message(chat_id, chunk)
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +170,6 @@ def run_bot() -> None:
             telegram_id = call.from_user.id
             lang_code = call.data.split("_", 1)[1]
 
-            # Make sure user exists
             get_or_create_user(telegram_id)
             update_user_language(telegram_id, lang_code)
 
@@ -154,11 +185,77 @@ def run_bot() -> None:
         except Exception:
             logger.error("Error in language callback:\n%s", traceback.format_exc())
 
-    # -- Non-text content (voice, photo, sticker, …) ------------------------
+    # -- Voice messages (transcribe via ElevenLabs STT) ----------------------
+    @bot.message_handler(content_types=["voice"])
+    def handle_voice(message):
+        try:
+            telegram_id = message.from_user.id
+            user = get_user(telegram_id)
+
+            if not user or not user["language"]:
+                handle_start(message)
+                return
+
+            update_last_seen(telegram_id)
+            lang = user["language"]
+
+            # Show "listening" feedback
+            status_msg = bot.send_message(
+                message.chat.id,
+                VOICE_TRANSCRIBING_MESSAGES.get(lang, VOICE_TRANSCRIBING_MESSAGES["en"]),
+            )
+
+            # Download the .ogg file from Telegram
+            file_info = bot.get_file(message.voice.file_id)
+            downloaded = bot.download_file(file_info.file_path)
+
+            # Write to a temp file and transcribe
+            tmp_path = None
+            try:
+                fd, tmp_path = tempfile.mkstemp(suffix=".ogg")
+                with os.fdopen(fd, "wb") as f:
+                    f.write(downloaded)
+
+                transcribed_text = transcribe_voice(tmp_path)
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+
+            # Delete the "listening" status message
+            try:
+                bot.delete_message(message.chat.id, status_msg.message_id)
+            except Exception:
+                pass
+
+            if not transcribed_text:
+                bot.send_message(
+                    message.chat.id,
+                    VOICE_FAILED_MESSAGES.get(lang, VOICE_FAILED_MESSAGES["en"]),
+                )
+                return
+
+            # Process the transcribed text exactly like a normal text message
+            _process_and_reply(bot, message.chat.id, telegram_id, user, transcribed_text)
+
+        except Exception:
+            logger.error(
+                "Error processing voice for %s:\n%s",
+                message.from_user.id,
+                traceback.format_exc(),
+            )
+            try:
+                bot.send_message(
+                    message.chat.id,
+                    "⚠️ An error occurred processing your voice message.",
+                )
+            except Exception:
+                pass
+
+    # -- Non-text/non-voice content (photo, sticker, …) ---------------------
     @bot.message_handler(
         content_types=[
             "audio", "document", "photo", "sticker", "video",
-            "video_note", "voice", "location", "contact",
+            "video_note", "location", "contact",
             "animation", "dice",
         ]
     )
@@ -191,20 +288,7 @@ def run_bot() -> None:
             if not text.strip():
                 return
 
-            hermes = HermesAdapter(user["hermes_profile"])
-            response = hermes.send_message(text, user["language"])
-
-            # Intercept language-change tags
-            match = re.search(r"\[LANGUAGE_CHANGED_TO:\s*([a-z]{2})\]", response)
-            if match:
-                new_lang = match.group(1)
-                if new_lang in ("ru", "en", "uz"):
-                    update_user_language(telegram_id, new_lang)
-                response = response.replace(match.group(0), "").strip()
-
-            for chunk in split_message(response):
-                if chunk.strip():
-                    bot.send_message(message.chat.id, chunk)
+            _process_and_reply(bot, message.chat.id, telegram_id, user, text)
 
         except Exception:
             logger.error(
@@ -227,3 +311,4 @@ def run_bot() -> None:
         long_polling_timeout=25,
         allowed_updates=["message", "callback_query"],
     )
+
