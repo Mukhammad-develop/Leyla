@@ -41,6 +41,15 @@ def update_user_language(telegram_id: int, language: str) -> None:
         conn.commit()
 
 
+def update_user_timezone(telegram_id: int, timezone_str: str) -> None:
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE users SET timezone = ? WHERE telegram_user_id = ?",
+            (timezone_str.strip(), telegram_id),
+        )
+        conn.commit()
+
+
 def update_last_seen(telegram_id: int) -> None:
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:

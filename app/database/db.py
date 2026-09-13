@@ -34,11 +34,17 @@ def init_db() -> None:
                     telegram_user_id INTEGER PRIMARY KEY,
                     hermes_profile   TEXT UNIQUE NOT NULL,
                     language         TEXT NOT NULL DEFAULT '',
+                    timezone         TEXT NOT NULL DEFAULT '',
                     created_at       TEXT NOT NULL DEFAULT (datetime('now')),
                     last_seen_at     TEXT,
                     status           TEXT NOT NULL DEFAULT 'active'
                 )
             """)
+            # Migration check: ensure timezone column exists on existing DBs
+            cursor = conn.execute("PRAGMA table_info(users)")
+            cols = [row[1] for row in cursor.fetchall()]
+            if "timezone" not in cols:
+                conn.execute("ALTER TABLE users ADD COLUMN timezone TEXT NOT NULL DEFAULT ''")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS reminders (
                     id               INTEGER PRIMARY KEY AUTOINCREMENT,

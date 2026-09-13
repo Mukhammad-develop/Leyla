@@ -214,6 +214,13 @@ class TestReminders(unittest.TestCase):
         reminders_after = get_pending_reminders(600001)
         self.assertEqual(len(reminders_after), 0)
 
+    def test_timezone_saved_via_message(self):
+        user, _ = get_or_create_user(600002)
+        adapter = HermesAdapter(user["hermes_profile"], telegram_user_id=600002, chat_id=600002)
+        resp = adapter.send_message("Men Toshkentdaman", "uz")
+        updated_user = get_user(600002)
+        self.assertEqual(updated_user["timezone"], "Asia/Tashkent")
+
 
 def tearDownModule():
     shutil.rmtree(_temp_dir, ignore_errors=True)

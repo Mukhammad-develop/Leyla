@@ -1,7 +1,7 @@
 """
 Hermes adapter — bridges each Telegram user to an isolated
 OpenAI-backed profile with persistent memory, conversation history,
-and real timer / reminder scheduling.
+dynamic timezone detection, and real timer / reminder scheduling.
 """
 
 import json
@@ -12,8 +12,10 @@ import tempfile
 import threading
 import time
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 from app.reminders.manager import add_reminder, get_pending_reminders, cancel_reminder
+from app.users.manager import get_user, update_user_timezone
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,25 @@ def _get_openai_client():
         except Exception as exc:
             logger.error("Failed to initialise OpenAI client: %s", exc)
             return None
+
+
+def parse_user_timezone(tz_str: str):
+    """Resolve an IANA timezone or UTC offset string to a tzinfo object."""
+    if not tz_str:
+        return None
+    tz_str = tz_str.strip()
+    try:
+        return ZoneInfo(tz_str)
+    except Exception:
+        pass
+    m = re.match(r"^(?:UTC|GMT)?\s*([+-]?\d{1,2})(?::?(\d{2}))?$", tz_str, re.IGNORECASE)
+    if m:
+        hours = int(m.group(1))
+        minutes = int(m.group(2)) if m.group(2) else 0
+        if hours < 0:
+            minutes = -minutes
+        return timezone(timedelta(hours=hours, minutes=minutes))
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -127,18 +148,56 @@ class HermesAdapter:
         name = {"ru": "Лейла", "en": "Leyla", "uz": "Laylo"}.get(current_lang, "Leyla")
 
         now_utc = datetime.now(timezone.utc)
-        now_uz = now_utc.astimezone(timezone(timedelta(hours=5)))
-        now_ru = now_utc.astimezone(timezone(timedelta(hours=3)))
+
+        # Retrieve user timezone from database
+        user = get_user(self.telegram_user_id) if self.telegram_user_id else None
+        user_tz_str = user.get("timezone", "").strip() if user else ""
+        tz_obj = parse_user_timezone(user_tz_str) if user_tz_str else None
+
+        if tz_obj:
+            user_local_now = now_utc.astimezone(tz_obj)
+            tz_section = (
+                f"USER LOCATION & TIMEZONE:\n"
+                f"• Timezone: {user_tz_str}\n"
+                f"• User Current Local Time: {user_local_now.strftime('%Y-%m-%d %H:%M:%S (%A)')}\n"
+                f"• UTC Time: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            )
+            reminder_tz_instructions = (
+                f"• The user's timezone is ALREADY SAVED as '{user_tz_str}'.\n"
+                f"• Their exact current local time is: {user_local_now.strftime('%H:%M:%S')}.\n"
+                f"• When setting reminders for a specific clock time (e.g. 'at 18:00', 'tomorrow 09:00'), "
+                f"calculate the exact seconds difference from their local time ({user_local_now.strftime('%H:%M')}).\n"
+                f"• If the user mentions moving or changing their city/country (e.g. 'I am in Dubai now' or 'Men Toshkentdaman'), "
+                f"update their timezone by appending `[SET_TIMEZONE: <IANA_or_offset>]`.\n"
+            )
+        else:
+            tz_section = (
+                f"USER LOCATION & TIMEZONE:\n"
+                f"• Timezone: NOT SET YET\n"
+                f"• UTC Time: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            )
+            reminder_tz_instructions = (
+                "• CRITICAL RULE ON TIMEZONE / LOCATION:\n"
+                "  - The user's location/timezone is NOT known yet.\n"
+                "  - NEVER guess or assume where the user lives! A Russian speaker might live in Uzbekistan, Russia, Europe, or Dubai. An Uzbek speaker could live in Uzbekistan, Korea, or USA.\n"
+                "  - If the user asks for a simple RELATIVE TIMER (e.g. 'timer 5 minutes', '5 minutga taymer qo\\'y', 'напомни через 10 минут'): "
+                "    Relative seconds do NOT depend on timezone. Set it immediately using `[REMINDER: <seconds> | <text>]`.\n"
+                "  - If the user asks for an alarm or reminder for a SPECIFIC CLOCK TIME (e.g. 'remind me at 18:00', 'напомни в 19:30', 'soat 15:00 da eslat', 'завтра утром'):\n"
+                "    1. DO NOT guess their time! Ask them politely where they are located / what city or country they live in so you can alert them at the exact right moment.\n"
+                "       (e.g., UZ: 'Eslatmani aniq vaqtda yuborishim uchun, qaysi shahar yoki davlatdasiz?', RU: 'Чтобы напомнить вовремя, подскажите, в каком городе вы находитесь?').\n"
+                "    2. Once the user replies with their city or country (e.g. 'Toshkent', 'Ташкент', 'Moskva', 'Самарканд', 'New York', 'Dubai', 'UTC+5'):\n"
+                "       - Identify the matching IANA timezone (e.g. Asia/Tashkent, Europe/Moscow, Asia/Dubai, etc.) or UTC offset.\n"
+                "       - Append `[SET_TIMEZONE: <IANA_timezone_or_offset>]` to your reply.\n"
+                "       - Calculate the delay from their local time and append `[REMINDER: <seconds> | <text>]`.\n"
+                "       - Warmly confirm their city/timezone has been saved and the reminder is set!\n"
+            )
 
         prompt = (
             f"You are {name}, a highly capable, warm, and thoughtful personal AI assistant.\n"
             f"Your name is {name}.\n"
             "Imagine yourself as a helpful companion with a computer who assists the user with everyday "
             "tasks, calculations, expenses, researching, writing, and organizing their day.\n\n"
-            f"CURRENT TIME & DATE:\n"
-            f"• UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"• Uzbekistan (UTC+5): {now_uz.strftime('%Y-%m-%d %H:%M:%S (%A)')}\n"
-            f"• Moscow (UTC+3): {now_ru.strftime('%Y-%m-%d %H:%M:%S (%A)')}\n\n"
+            f"{tz_section}\n"
             f"The user's current preferred language code is: '{current_lang}'.\n"
             "You MUST respond primarily in that language unless the user asks to switch.\n\n"
             "BEHAVIOR & FORMATTING RULES:\n"
@@ -151,15 +210,14 @@ class HermesAdapter:
             "⏰ TIMERS & REMINDERS (NATIVE CAPABILITY):\n"
             "• You HAVE full ability to set real timers, alarms, and reminders for the user!\n"
             "• NEVER tell the user that you cannot set timers, alarms, or reminders. You CAN and MUST!\n"
-            "• When the user asks for a timer or reminder (e.g. 'Remind me in 10 minutes to take medicine', "
-            "'5 minutga taymer qo\\'y', 'Ertaga soat 08:00 da dori ichishni eslat', 'Напомни через полчаса выключить суп'):\n"
+            f"{reminder_tz_instructions}"
+            "• When setting a timer or reminder:\n"
             "  1. Calculate the exact delay in seconds from the current time.\n"
             "     - 1 minute = 60\n"
             "     - 5 minutes = 300\n"
             "     - 10 minutes = 600\n"
             "     - 1 hour = 3600\n"
-            "     - Specific time (e.g. at 18:00): calculate difference in seconds between the current local time and the target time.\n"
-            "  2. Append the tag `[REMINDER: <seconds> | <text to remind>]` at the end of your response.\n"
+            "  2. Append the tag `[REMINDER: <seconds> | <text to remind>]` to your response.\n"
             "     Examples:\n"
             "     - User: '5 minutdan keyin suv ichishni eslat' -> Append `[REMINDER: 300 | Suv ichish]`\n"
             "     - User: 'Поставь таймер на 15 минут' -> Append `[REMINDER: 900 | Время таймера вышло! ⏰]`\n"
@@ -211,6 +269,16 @@ class HermesAdapter:
                 response = self._openai_response(
                     client, message, current_lang, history, memory,
                 )
+
+            # Process [SET_TIMEZONE: <tz>] tags
+            tz_matches = re.findall(r"\[SET_TIMEZONE:\s*(.+?)\]", response)
+            for tz_val in tz_matches:
+                try:
+                    update_user_timezone(self.telegram_user_id, tz_val.strip())
+                    logger.info("Updated timezone for user %d to %s", self.telegram_user_id, tz_val.strip())
+                except Exception as exc:
+                    logger.error("Failed to update user timezone: %s", exc)
+            response = re.sub(r"\[SET_TIMEZONE:\s*.+?\]", "", response).strip()
 
             # Process [REMINDER: <seconds> | <text>] tags
             rem_matches = re.findall(r"\[REMINDER:\s*(\d+)\s*\|\s*(.+?)\]", response)
@@ -289,6 +357,8 @@ class HermesAdapter:
             return "Хорошо, перехожу на русский. [LANGUAGE_CHANGED_TO: ru]"
         if "o'zbekcha" in low or "o'zbek" in low:
             return "Xo'p, endi o'zbekchada gaplashaman. [LANGUAGE_CHANGED_TO: uz]"
+        if "toshkent" in low or "tashkent" in low or "ташкент" in low:
+            return "Toshkent vaqti saqlandi! [SET_TIMEZONE: Asia/Tashkent]"
         if "remind me in" in low or "taymer" in low or "напомни" in low or "eslat" in low:
             return "Timer set! [REMINDER: 10 | Test reminder]"
         if "my name is" in low:
