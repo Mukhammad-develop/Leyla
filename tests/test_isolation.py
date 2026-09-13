@@ -9,6 +9,7 @@ temp_dir = tempfile.mkdtemp()
 os.environ["DATABASE_PATH"] = os.path.join(temp_dir, "test.db")
 os.environ["DATA_DIR"] = temp_dir
 os.environ["TELEGRAM_BOT_TOKEN"] = "test"
+os.environ["TEST_MODE"] = "1"
 
 from app.database.db import init_db
 from app.users.manager import get_or_create_user, update_user_language, get_user
