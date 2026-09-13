@@ -128,6 +128,7 @@ def split_message(text: str, chunk_size: int = 4000) -> list[str]:
 
 def _process_and_reply(bot, chat_id, telegram_id, user, text: str) -> None:
     """Common logic: send text through Hermes and reply with the result."""
+    bot.send_chat_action(chat_id, "typing")
     hermes = HermesAdapter(user["hermes_profile"])
     response = hermes.send_message(text, user["language"])
 
