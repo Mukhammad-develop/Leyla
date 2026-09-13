@@ -2,4 +2,15 @@
 data/
 __pycache__/
 *.pyc
+*.pyo
 venv/
+.venv/
+hermes-agent-main/
+hermes-agent/
+hermes-agent.zip
+test_env/
+test_env_311/
+*.egg-info/
+dist/
+build/
+.DS_Store

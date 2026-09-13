@@ -1,140 +1,219 @@
-import os
-import logging
+"""
+Hermes adapter — bridges each Telegram user to an isolated
+OpenAI-backed profile with persistent memory and conversation history.
+
+In production the OpenAI client is reused (singleton per profile_id).
+A per-profile threading lock serializes state mutations so concurrent
+Telegram updates for the same user never corrupt files.
+
+File writes use atomic rename to prevent corruption on crash.
+"""
+
 import json
-import threading
+import logging
+import os
 import re
-try:
-    import openai
-except ImportError:
-    openai = None
+import tempfile
+import threading
 
 logger = logging.getLogger(__name__)
 
-# Global lock for Hermes concurrency safety per user
-_user_locks = {}
+# ---------------------------------------------------------------------------
+# Per-user locks
+# ---------------------------------------------------------------------------
+_user_locks: dict[str, threading.Lock] = {}
 _lock_mutex = threading.Lock()
 
-def _get_user_lock(profile_id: str):
+
+def _get_user_lock(profile_id: str) -> threading.Lock:
     with _lock_mutex:
         if profile_id not in _user_locks:
             _user_locks[profile_id] = threading.Lock()
         return _user_locks[profile_id]
 
+
+# ---------------------------------------------------------------------------
+# Singleton OpenAI client  (created once, reused for every message)
+# ---------------------------------------------------------------------------
+_openai_client = None
+_openai_client_lock = threading.Lock()
+
+
+def _get_openai_client():
+    """Return a shared OpenAI client or None when unavailable."""
+    global _openai_client
+    if _openai_client is not None:
+        return _openai_client
+    with _openai_client_lock:
+        if _openai_client is not None:          # double-check
+            return _openai_client
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            logger.warning("OPENAI_API_KEY not set — LLM calls disabled")
+            return None
+        try:
+            import openai
+            _openai_client = openai.OpenAI(api_key=api_key)
+            return _openai_client
+        except Exception as exc:
+            logger.error("Failed to initialise OpenAI client: %s", exc)
+            return None
+
+
+# ---------------------------------------------------------------------------
+# Adapter
+# ---------------------------------------------------------------------------
+MAX_HISTORY_TURNS = 50          # messages kept on disk
+CONTEXT_WINDOW_TURNS = 20       # messages sent to the model
+
+
 class HermesAdapter:
+    """One adapter instance per incoming message.  Cheap to construct."""
+
     def __init__(self, profile_id: str):
         self.profile_id = profile_id
-        # We simulate the Hermes environment by ensuring a directory per profile
-        self.profile_dir = os.path.join(os.environ.get("DATA_DIR", "data"), "hermes_profiles", profile_id)
+        self.data_dir = os.environ.get("DATA_DIR", "data")
+        self.profile_dir = os.path.join(self.data_dir, "hermes_profiles", profile_id)
         os.makedirs(self.profile_dir, exist_ok=True)
         self.memory_file = os.path.join(self.profile_dir, "memory.json")
         self.history_file = os.path.join(self.profile_dir, "history.json")
-        
-        self.api_key = os.environ.get("OPENAI_API_KEY")
         self.model = os.environ.get("OPENAI_MODEL", "gpt-5.6-luna")
-        self.test_mode = os.environ.get("TEST_MODE") == "1"
-        
-        if self.api_key and openai:
-            self.client = openai.OpenAI(api_key=self.api_key)
-        else:
-            self.client = None
-            if not self.test_mode:
-                logger.warning("OpenAI API key not set or openai package not installed!")
 
-    def _get_system_prompt(self, current_lang):
-        return (
-            "You are Hermes, a highly capable personal AI assistant.\n"
-            "Imagine yourself as a person who has access to a computer and can help the user with everyday calculations, "
-            "tracking expenses, researching, writing, and organizing.\n"
-            f"The user's current preferred language code is: '{current_lang}'. "
-            "Please respond primarily in this language.\n\n"
-            "IMPORTANT RULES ABOUT LANGUAGE SWITCHING:\n"
-            "If the user EXPLICITLY requests to change the conversation language (e.g. 'Speak English', 'Давай по-русски', 'Endi o\\'zbekcha gaplashamiz'), "
-            "you MUST acknowledge the change in the NEW language and include EXACTLY the string '[LANGUAGE_CHANGED_TO: <CODE>]' at the very end of your response, "
-            "where <CODE> is 'ru', 'en', or 'uz'. Do NOT include this tag unless they explicitly ask to change the language settings.\n\n"
-            "MEMORY INSTRUCTIONS:\n"
-            "You can remember information about the user. If they tell you something to remember, acknowledge it and include '[REMEMBER: <fact>]' in your response. "
-            "Use the provided memory context to personalize your answers."
-        )
+    # ---- JSON I/O (atomic writes) ----------------------------------------
 
-    def _read_json(self, path):
+    @staticmethod
+    def _read_json(path: str) -> list:
         if not os.path.exists(path):
             return []
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except (json.JSONDecodeError, OSError):
+            logger.exception("Corrupt JSON file %s — resetting", path)
+            return []
 
-    def _write_json(self, path, data):
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+    @staticmethod
+    def _write_json(path: str, data) -> None:
+        """Write via tmp-file + rename so a crash never leaves a half-written file."""
+        dir_name = os.path.dirname(path)
+        fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, path)       # atomic on POSIX
+        except BaseException:
+            # Clean up the temp file if something goes wrong
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    # ---- System prompt ----------------------------------------------------
+
+    @staticmethod
+    def _get_system_prompt(current_lang: str) -> str:
+        return (
+            "You are Leyla, a highly capable personal AI assistant.\n"
+            "Imagine yourself as a person who has access to a computer and can "
+            "help the user with everyday calculations, tracking expenses, "
+            "researching, writing, and organizing.\n\n"
+            f"The user's current preferred language code is: '{current_lang}'.\n"
+            "You MUST respond in that language unless the user explicitly asks "
+            "you to switch.\n\n"
+            "LANGUAGE SWITCHING RULES:\n"
+            "• If the user EXPLICITLY asks to change the conversation language "
+            "(e.g. 'Speak English', 'Давай по-русски', "
+            "'Endi o\\'zbekcha gaplashamiz'), acknowledge the change in the "
+            "NEW language and append EXACTLY the tag "
+            "'[LANGUAGE_CHANGED_TO: <CODE>]' at the very end of your "
+            "response, where <CODE> is one of: ru, en, uz.\n"
+            "• Do NOT emit this tag for any other reason.\n\n"
+            "MEMORY RULES:\n"
+            "• When the user tells you a fact to remember, store it by "
+            "appending '[REMEMBER: <fact>]' to your response.\n"
+            "• Use the memory context below to personalise answers.\n"
+        )
+
+    # ---- Public entry point -----------------------------------------------
 
     def send_message(self, message: str, current_lang: str) -> str:
-        """Sends a message to the Hermes profile and returns the response."""
+        """Thread-safe: acquire per-user lock → call LLM → persist state."""
         lock = _get_user_lock(self.profile_id)
         with lock:
             history = self._read_json(self.history_file)
             memory = self._read_json(self.memory_file)
-            
-            if self.test_mode or not self.client:
+
+            client = _get_openai_client()
+            if client is None:
+                # Fallback for tests / missing key
                 response = self._mock_llm_response(message, current_lang, memory)
             else:
-                response = self._openai_llm_response(message, current_lang, history, memory)
-                
+                response = self._openai_response(
+                    client, message, current_lang, history, memory,
+                )
+
             history.append({"role": "user", "content": message})
             history.append({"role": "assistant", "content": response})
-            
-            self._write_json(self.history_file, history[-50:]) # keep last 50
+            self._write_json(self.history_file, history[-MAX_HISTORY_TURNS:])
             self._write_json(self.memory_file, memory)
-            
             return response
-            
-    def _openai_llm_response(self, message, current_lang, history, memory):
+
+    # ---- OpenAI call ------------------------------------------------------
+
+    def _openai_response(self, client, message, current_lang, history, memory):
         system_prompt = self._get_system_prompt(current_lang)
         if memory:
-            system_prompt += "\n\nUser Memory Context:\n" + "\n".join(f"- {m['value']}" for m in memory if 'value' in m)
+            system_prompt += "\nUser Memory Context:\n" + "\n".join(
+                f"- {m['value']}" for m in memory if "value" in m
+            )
 
         messages = [{"role": "system", "content": system_prompt}]
-        
-        for msg in history[-10:]:
+        for msg in history[-CONTEXT_WINDOW_TURNS:]:
             messages.append({"role": msg["role"], "content": msg["content"]})
-            
         messages.append({"role": "user", "content": message})
-        
+
         try:
-            response = self.client.chat.completions.create(
+            completion = client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                temperature=0.7
+                temperature=0.7,
             )
-            reply = response.choices[0].message.content
-            
-            # Extract memory tags
-            memory_matches = re.findall(r'\[REMEMBER:\s*(.+?)\]', reply)
-            for fact in memory_matches:
-                memory.append({"type": "fact", "value": fact})
-                reply = reply.replace(f"[REMEMBER: {fact}]", "").strip()
-                
-            return reply
-        except Exception as e:
-            logger.error(f"OpenAI error: {e}")
-            return "I'm having trouble connecting to my brain right now. Please try again later."
+            reply = completion.choices[0].message.content or ""
 
-    def _mock_llm_response(self, message, current_lang, memory):
-        msg_lower = message.lower()
-        if "speak english" in msg_lower or "english" in msg_lower and "speak" in msg_lower:
-            return "Okay, I will speak English from now on. [LANGUAGE_CHANGED_TO: en]"
-        elif "по-русски" in msg_lower or "русский" in msg_lower:
-            return "Хорошо, теперь я буду говорить по-русски. [LANGUAGE_CHANGED_TO: ru]"
-        elif "o'zbekcha" in msg_lower or "o'zbek" in msg_lower:
-            return "Yaxshi, endi men o'zbek tilida gaplashaman. [LANGUAGE_CHANGED_TO: uz]"
-        
-        if "my name is" in msg_lower:
-            orig_name = message[message.lower().find("my name is") + len("my name is"):].strip()
-            memory.append({"type": "name", "value": orig_name})
-            return f"I will remember that your name is {orig_name}."
-            
-        if "what is my name" in msg_lower:
-            names = [m["value"] for m in memory if m["type"] == "name"]
+            # Extract [REMEMBER: ...] tags and persist them
+            for fact in re.findall(r"\[REMEMBER:\s*(.+?)\]", reply):
+                memory.append({"type": "fact", "value": fact})
+            reply = re.sub(r"\[REMEMBER:\s*.+?\]", "", reply).strip()
+
+            return reply
+        except Exception as exc:
+            logger.error("OpenAI API error for %s: %s", self.profile_id, exc)
+            error_msgs = {
+                "ru": "Произошла ошибка при обработке запроса. Попробуйте ещё раз.",
+                "en": "Something went wrong. Please try again.",
+                "uz": "Xatolik yuz berdi. Iltimos, qaytadan urinib ko'ring.",
+            }
+            return error_msgs.get(current_lang, error_msgs["en"])
+
+    # ---- Mock (used in tests / when no API key) ---------------------------
+
+    @staticmethod
+    def _mock_llm_response(message, current_lang, memory):
+        low = message.lower()
+        if "speak english" in low:
+            return "Okay, I will speak English now. [LANGUAGE_CHANGED_TO: en]"
+        if "по-русски" in low or "русский" in low:
+            return "Хорошо, перехожу на русский. [LANGUAGE_CHANGED_TO: ru]"
+        if "o'zbekcha" in low or "o'zbek" in low:
+            return "Xo'p, endi o'zbekchada gaplashaman. [LANGUAGE_CHANGED_TO: uz]"
+        if "my name is" in low:
+            name = message[low.find("my name is") + len("my name is"):].strip()
+            memory.append({"type": "name", "value": name})
+            return f"I will remember that your name is {name}."
+        if "what is my name" in low:
+            names = [m["value"] for m in memory if m.get("type") == "name"]
             if names:
                 return f"Your name is {names[-1]}."
             return "I don't know your name yet."
-            
         return f"Echo ({current_lang}): {message}"
