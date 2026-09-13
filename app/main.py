@@ -1,6 +1,12 @@
 import os
+import sys
 import logging
 from dotenv import load_dotenv
+
+# Automatically add the project root to sys.path so imports work even if run directly
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from app.database.db import init_db
 from app.telegram.bot import run_bot
