@@ -3,6 +3,9 @@ import sys
 import logging
 from dotenv import load_dotenv
 
+# Load environment variables FIRST before importing other modules
+load_dotenv()
+
 # Automatically add the project root to sys.path so imports work even if run directly
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
@@ -17,9 +20,7 @@ logging.basicConfig(
 )
 
 def main():
-    load_dotenv()
-    
-    if not os.environ.get("TELEGRAM_BOT_TOKEN"):
+    if not os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN") == "dummy":
         logging.error("TELEGRAM_BOT_TOKEN environment variable not set.")
         return
         

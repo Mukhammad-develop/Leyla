@@ -3,6 +3,9 @@ import re
 import logging
 from telebot import TeleBot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from app.users.manager import get_or_create_user, update_user_language, update_last_seen, get_user
 from app.hermes.adapter import HermesAdapter
