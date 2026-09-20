@@ -5,6 +5,7 @@ Telegram bot — single long-running process serving all users.
 import html
 import logging
 import os
+import io
 import re
 import tempfile
 import traceback
@@ -160,7 +161,7 @@ def _process_translator_mode(bot, chat_id, text, target_lang, lang_code):
     bot.send_chat_action(chat_id, "record_voice")
     audio_bytes = text_to_speech(translated, target_lang)
     if audio_bytes:
-        bot.send_voice(chat_id, audio_bytes, reply_markup=markup)
+        bot.send_voice(chat_id, io.BytesIO(audio_bytes), reply_markup=markup)
 
 
 def _process_and_reply(bot, chat_id, telegram_id, user, text: str) -> None:
