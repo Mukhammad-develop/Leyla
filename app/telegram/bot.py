@@ -3,15 +3,18 @@ Telegram bot — single long-running process serving all users.
 """
 
 import html
+import io
+import json
 import logging
 import os
-import io
 import re
 import tempfile
+import threading
+import time
 import traceback
 
 from telebot import TeleBot
-from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.hermes.adapter import HermesAdapter
 from app.users.manager import (
@@ -21,95 +24,110 @@ from app.users.manager import (
     update_user_language,
     update_translator_mode,
     get_all_users,
-    get_all_users,
+    get_recent_users,
 )
 from app.voice.stt import transcribe_voice
 from app.reminders.scheduler import start_reminder_scheduler
+from app.reminders.manager import get_pending_reminders, count_pending
 from app.vision.analyzer import analyze_image
-from app.photo_vault.manager import save_photo, get_photo, delete_photo
+from app.photo_vault.manager import (
+    save_photo,
+    get_photo,
+    get_photo_file_id,
+    delete_photo,
+    list_photos,
+)
 from app.translator.engine import translate_text, text_to_speech
+from app.imagegen.generator import generate_image
+from app.usage.tracker import (
+    is_limit_reached,
+    increment_usage,
+    get_daily_limit,
+    set_daily_limit,
+    get_usage_today,
+)
+from app.contacts.manager import get_all_contacts
+from app.lists.manager import get_all_lists
+from app.expenses.manager import get_recent_expenses
+from app.calories.manager import get_all_entries as get_all_calorie_entries
+from app.events.manager import get_all_events
 
 logger = logging.getLogger(__name__)
 
 ADMIN_ID = 1927099919
+START_TIME = time.time()
+
+# Maximum characters sent to ElevenLabs TTS in one go
+TTS_MAX_CHARS = 2500
 
 # ---------------------------------------------------------------------------
 # Localised messages
 # ---------------------------------------------------------------------------
 INTRO_MESSAGES = {
     "ru": (
-        "👋 Привет! Меня зовут Лейла, ваш личный помощник.
-
-"
-        "Вот что я умею (пишите или отправляйте голосовые!):
-"
-        "💱 **Курсы валют**: «Сколько будет 100 долларов в сумах?»
-"
-        "⏰ **Напоминания**: «Напомни выпить лекарство через 2 часа»
-"
-        "🌐 **Переводчик**: «Включи переводчик на китайский» (переводит голос и текст)
-"
-        "📸 **Чтение фото**: Отправьте фото документа и спросите «Что здесь написано?»
-"
-        "🗂 **Хранилище**: Отправьте фото и скажите «Сохрани как мой паспорт»
-"
-        "📞 **Контакты**: «Запомни номер врача: Алиев +99890...»
-"
-        "🕌 **Время намаза**: «Время намаза в Ташкенте»
-"
-        "🔎 **Поиск в сети**: «Какая сегодня погода?»
-
-"
+        "👋 Привет! Меня зовут Лейла, ваш личный помощник.\n\n"
+        "Вот что я умею (пишите или отправляйте голосовые!):\n"
+        "💱 **Курсы валют**: «Сколько будет 100 долларов в сумах?»\n"
+        "⏰ **Напоминания**: «Напомни выпить лекарство через 2 часа»\n"
+        "🌅 **Утренняя сводка**: погода + намаз + напоминания каждое утро. Скажите «присылай сводку в 7:30» или «выключи сводку»\n"
+        "🌤️ **Погода**: «Какая погода в Ташкенте?»\n"
+        "🌐 **Переводчик**: «Включи переводчик на китайский» (голос и текст)\n"
+        "🗣️ **Голосовые ответы**: скажите «отвечай голосом» или «отвечай текстом и голосом»\n"
+        "📸 **Чтение фото**: Отправьте фото документа и спросите «Что здесь написано?»\n"
+        "🎨 **Генерация картинок**: «Нарисуй кота в космосе»\n"
+        "🗂 **Хранилище**: Отправьте фото и скажите «Сохрани как мой паспорт»\n"
+        "📞 **Контакты**: «Запомни номер врача: Алиев +99890...»\n"
+        "📝 **Списки**: «Добавь молоко в список покупок» — я не забуду!\n"
+        "💸 **Расходы**: «Потратил 50 тысяч на обед»\n"
+        "📊 **Калории**: «Съел два плова» — посчитаю и запомню\n"
+        "🎂 **Дни рождения**: «День рождения мамы 15 марта» — напомню каждый год\n"
+        "🕌 **Время намаза**: «Время намаза в Ташкенте»\n"
+        "🔎 **Поиск в сети**: «Какие сегодня новости?»\n"
+        "📦 **Экспорт данных**: скажите «пришли мне мои данные»\n\n"
         "🎤 Вам не нужно учить команды — просто общайтесь со мной как с человеком!"
     ),
     "en": (
-        "👋 Hello! My name is Laila, your personal assistant.
-
-"
-        "Here is what I can do (just type or speak!):
-"
-        "💱 **Live Currency**: \"How much is 100 USD in UZS?\"
-"
-        "⏰ **Reminders**: \"Remind me to take my pills in 2 hours\"
-"
-        "🌐 **Translator**: \"Turn on translator to Chinese\" (translates voice & text)
-"
-        "📸 **Read Photos**: Send a photo of a document and ask \"What does this say?\"
-"
-        "🗂 **Photo Vault**: Send an image and say \"Save this as my passport\"
-"
-        "📞 **Contacts**: \"Save my doctor's number: Aliyev +99890...\"
-"
-        "🕌 **Prayer Times**: \"Prayer times in Tashkent\"
-"
-        "🔎 **Web Search**: \"What is the weather today?\"
-
-"
+        "👋 Hello! My name is Laila, your personal assistant.\n\n"
+        "Here is what I can do (just type or speak!):\n"
+        "💱 **Live Currency**: \"How much is 100 USD in UZS?\"\n"
+        "⏰ **Reminders**: \"Remind me to take my pills in 2 hours\"\n"
+        "🌅 **Morning Briefing**: weather + prayer times + reminders every morning. Say \"send it at 7:30\" or \"turn it off\"\n"
+        "🌤️ **Weather**: \"What is the weather in Tashkent?\"\n"
+        "🌐 **Translator**: \"Turn on translator to Chinese\" (voice & text)\n"
+        "🗣️ **Voice Replies**: say \"answer with voice\" or \"answer with text and voice\"\n"
+        "📸 **Read Photos**: Send a photo of a document and ask \"What does this say?\"\n"
+        "🎨 **Image Generation**: \"Draw a cat in space\"\n"
+        "🗂 **Photo Vault**: Send an image and say \"Save this as my passport\"\n"
+        "📞 **Contacts**: \"Save my doctor's number: Aliyev +99890...\"\n"
+        "📝 **Lists**: \"Add milk to my shopping list\" — I never forget!\n"
+        "💸 **Expenses**: \"I spent 50k on lunch\"\n"
+        "📊 **Calories**: \"I ate two plates of plov\" — I count and remember\n"
+        "🎂 **Birthdays**: \"Mom's birthday is March 15\" — yearly reminders\n"
+        "🕌 **Prayer Times**: \"Prayer times in Tashkent\"\n"
+        "🔎 **Web Search**: \"What is the news today?\"\n"
+        "📦 **Data Export**: say \"send me my data\"\n\n"
         "🎤 You don't need to learn commands — just talk to me naturally!"
     ),
     "uz": (
-        "👋 Salom! Mening ismim Laylo, sizning shaxsiy yordamchingizman.
-
-"
-        "Men nimalar qila olaman (yozing yoki ovozli xabar yuboring!):
-"
-        "💱 **Valyuta kursi**: «100 dollar necha so'm bo'ladi?»
-"
-        "⏰ **Eslatmalar**: «2 soatdan keyin dori ichishni eslat»
-"
-        "🌐 **Tarjimon**: «Xitoy tiliga tarjimonni yoq» (ovoz va matnni tarjima qiladi)
-"
-        "📸 **Rasm o'qish**: Hujjat rasmini yuboring va «Bu yerda nima yozilgan?» deb so'rang
-"
-        "🗂 **Rasmlar xazinasi**: Rasm yuboring va «Buni pasportim deb saqla» deng
-"
-        "📞 **Kontaktlar**: «Shifokor raqamini saqla: Aliyev +99890...»
-"
-        "🕌 **Namoz vaqtlari**: «Toshkentda namoz vaqtlari»
-"
-        "🔎 **Internet qidiruv**: «Bugun ob-havo qanday?»
-
-"
+        "👋 Salom! Mening ismim Laylo, sizning shaxsiy yordamchingizman.\n\n"
+        "Men nimalar qila olaman (yozing yoki ovozli xabar yuboring!):\n"
+        "💱 **Valyuta kursi**: «100 dollar necha so'm bo'ladi?»\n"
+        "⏰ **Eslatmalar**: «2 soatdan keyin dori ichishni eslat»\n"
+        "🌅 **Tonggi qisqacha**: ob-havo + namoz + eslatmalar har tong. «7:30 da yubor» yoki «o'chirib qo'y» deb ayting\n"
+        "🌤️ **Ob-havo**: «Toshkentda ob-havo qanday?»\n"
+        "🌐 **Tarjimon**: «Xitoy tiliga tarjimonni yoq» (ovoz va matn)\n"
+        "🗣️ **Ovozli javoblar**: «ovozli javob ber» yoki «matn va ovoz bilan javob ber» deb ayting\n"
+        "📸 **Rasm o'qish**: Hujjat rasmini yuboring va «Bu yerda nima yozilgan?» deb so'rang\n"
+        "🎨 **Rasm yaratish**: «Koinotda mushuk chiz»\n"
+        "🗂 **Rasmlar xazinasi**: Rasm yuboring va «Buni pasportim deb saqla» deng\n"
+        "📞 **Kontaktlar**: «Shifokor raqamini saqla: Aliyev +99890...»\n"
+        "📝 **Ro'yxatlar**: «Xarid ro'yxatiga sut qo'sh» — hech qachon unutmayman!\n"
+        "💸 **Xarajatlar**: «Tushlikka 50 ming sarfladim»\n"
+        "📊 **Kaloriyalar**: «Ikki plova yedim» — sanab, eslab qolaman\n"
+        "🎂 **Tug'ilgan kunlar**: «Onamning tug'ilgan kuni 15-mart» — har yili eslataman\n"
+        "🕌 **Namoz vaqtlari**: «Toshkentda namoz vaqtlari»\n"
+        "🔎 **Internet qidiruv**: «Bugungi yangiliklar qanday?»\n"
+        "📦 **Ma'lumot eksporti**: «ma'lumotlarimni yubor» deb ayting\n\n"
         "🎤 Hech qanday buyruqlarni yodlash shart emas — men bilan oddiy gaplashing!"
     ),
 }
@@ -124,6 +142,18 @@ VOICE_FAILED_MESSAGES = {
     "ru": "❌ Не удалось распознать голосовое сообщение. Попробуйте ещё раз.",
     "en": "❌ Could not transcribe your voice message. Please try again.",
     "uz": "❌ Ovozli xabarni aniqlab bo'lmadi. Iltimos, qaytadan urinib ko'ring.",
+}
+
+LIMIT_MESSAGES = {
+    "ru": "😔 Вы достигли дневного лимита в {limit} сообщений. Это помогает контролировать расходы. До завтра! 🌙",
+    "en": "😔 You've reached the daily limit of {limit} messages. This helps keep costs under control. See you tomorrow! 🌙",
+    "uz": "😔 Siz kunlik {limit} ta xabar chegarasiga yetdingiz. Bu xarajatlarni nazorat qilishga yordam beradi. Ertagacha! 🌙",
+}
+
+IMAGE_FAILED_MESSAGES = {
+    "ru": "❌ Не удалось создать изображение. Попробуйте ещё раз.",
+    "en": "❌ Could not generate the image. Please try again.",
+    "uz": "❌ Rasm yarata olmadim. Qaytadan urinib ko'ring.",
 }
 
 
@@ -187,6 +217,34 @@ def format_telegram_html(text: str) -> str:
     return text
 
 
+def _send_text_chunks(bot, chat_id, text):
+    """Send a (possibly long) message as HTML, falling back to plain text."""
+    for chunk in split_message(text):
+        if chunk.strip():
+            try:
+                bot.send_message(chat_id, format_telegram_html(chunk), parse_mode="HTML")
+            except Exception:
+                bot.send_message(chat_id, chunk)
+
+
+def _deliver_response(bot, chat_id, user, response_text):
+    """Deliver an assistant reply honouring the user's voice_mode."""
+    lang = user.get("language") or "en"
+    mode = user.get("voice_mode") or "text"
+
+    if mode in ("text", "both"):
+        _send_text_chunks(bot, chat_id, response_text)
+
+    if mode in ("voice", "both"):
+        bot.send_chat_action(chat_id, "record_voice")
+        audio_bytes = text_to_speech(response_text[:TTS_MAX_CHARS], lang)
+        if audio_bytes:
+            bot.send_voice(chat_id, io.BytesIO(audio_bytes))
+        elif mode == "voice":
+            # TTS unavailable — never leave the user with silence
+            _send_text_chunks(bot, chat_id, response_text)
+
+
 def _process_translator_mode(bot, chat_id, text, target_lang, lang_code):
     """Handle a message while in Translator mode."""
     translated = translate_text(text, target_lang)
@@ -204,9 +262,86 @@ def _process_translator_mode(bot, chat_id, text, target_lang, lang_code):
         bot.send_voice(chat_id, io.BytesIO(audio_bytes), reply_markup=markup)
 
 
+def _send_data_export(bot, chat_id, telegram_id, lang):
+    """Send the user everything we store about them: one JSON file + saved photos."""
+    try:
+        adapter = HermesAdapter(f"telegram_{telegram_id}", telegram_user_id=telegram_id, chat_id=chat_id)
+        user = get_user(telegram_id) or {}
+        memory = HermesAdapter._read_json(adapter.memory_file)
+        history = HermesAdapter._read_json(adapter.history_file)
+
+        export = {
+            "profile": {
+                "telegram_user_id": telegram_id,
+                "language": user.get("language"),
+                "timezone": user.get("timezone"),
+                "city": user.get("city"),
+                "voice_mode": user.get("voice_mode"),
+                "briefing_enabled": bool(user.get("briefing_enabled")),
+                "briefing_time": user.get("briefing_time"),
+                "calorie_goal": user.get("calorie_goal"),
+                "created_at": user.get("created_at"),
+            },
+            "memory_facts": [m.get("value") for m in memory if isinstance(m, dict) and "value" in m],
+            "conversation_history": history,
+            "contacts": get_all_contacts(telegram_id),
+            "lists": get_all_lists(telegram_id),
+            "expenses": get_recent_expenses(telegram_id, limit=1000),
+            "calorie_entries": get_all_calorie_entries(telegram_id, limit=1000),
+            "events": get_all_events(telegram_id),
+            "pending_reminders": get_pending_reminders(telegram_id),
+            "saved_photos": [
+                {"label": p["label"], "file_type": p["file_type"], "saved_at": p.get("created_at")}
+                for p in list_photos(telegram_id)
+            ],
+        }
+
+        payload = json.dumps(export, ensure_ascii=False, indent=2).encode("utf-8")
+        caption = {
+            "ru": "📦 Все ваши данные. Сохранённые фото отправлю следом.",
+            "en": "📦 All your data. Saved photos follow below.",
+            "uz": "📦 Barcha ma'lumotlaringiz. Saqlangan rasmlar quyida.",
+        }.get(lang, "📦 All your data. Saved photos follow below.")
+        bot.send_document(
+            chat_id,
+            io.BytesIO(payload),
+            visible_file_name="leyla_data_export.json",
+            caption=caption,
+        )
+
+        for photo in list_photos(telegram_id)[:20]:
+            try:
+                file_id = get_photo_file_id(telegram_id, photo["label"])
+                if file_id:
+                    bot.send_photo(chat_id, file_id, caption=f"📸 {photo['label']}")
+                    continue
+                path = get_photo(telegram_id, photo["label"])
+                if path and os.path.exists(path):
+                    with open(path, "rb") as f:
+                        bot.send_photo(chat_id, f, caption=f"📸 {photo['label']}")
+            except Exception as exc:
+                logger.warning("Export: could not send photo '%s': %s", photo["label"], exc)
+    except Exception:
+        logger.error("Export error:\n%s", traceback.format_exc())
+        err = {
+            "ru": "❌ Не удалось подготовить экспорт. Попробуйте позже.",
+            "en": "❌ Could not prepare the export. Please try later.",
+            "uz": "❌ Eksportni tayyorlab bo'lmadi. Keyinroq urinib ko'ring.",
+        }
+        bot.send_message(chat_id, err.get(lang, err["en"]))
+
+
 def _process_and_reply(bot, chat_id, telegram_id, user, text: str) -> None:
     bot.send_chat_action(chat_id, "typing")
-    
+
+    # Daily usage limit (API cost control) — admin is exempt
+    if telegram_id != ADMIN_ID and is_limit_reached(telegram_id):
+        lang = user.get("language") or "en"
+        msg = LIMIT_MESSAGES.get(lang, LIMIT_MESSAGES["en"]).format(limit=get_daily_limit())
+        bot.send_message(chat_id, msg)
+        return
+    increment_usage(telegram_id)
+
     # Check if translator mode is active
     if user.get("translator_lang"):
         _process_translator_mode(bot, chat_id, text, user["translator_lang"], user["language"])
@@ -232,26 +367,36 @@ def _process_and_reply(bot, chat_id, telegram_id, user, text: str) -> None:
         else:
             update_translator_mode(telegram_id, pending_translator)
 
-    # Send text chunks
-    chunks = split_message(response)
-    for chunk in chunks:
-        if chunk.strip():
-            try:
-                bot.send_message(chat_id, format_telegram_html(chunk), parse_mode="HTML")
-            except Exception:
-                bot.send_message(chat_id, chunk)
+    if not response.strip():
+        response = "✅"
 
-    # Handle Photo Vault GET
+    # Refresh user — tags may have changed language or voice mode
+    user = get_user(telegram_id) or user
+
+    # Send reply as text / voice / both
+    _deliver_response(bot, chat_id, user, response)
+
+    # Handle Photo Vault GET — Telegram file_id first (cloud backup), local file as fallback
     pending_get = getattr(hermes, "_pending_get_photo", None)
     if pending_get:
-        path = get_photo(telegram_id, pending_get)
-        if path and os.path.exists(path):
-            bot.send_chat_action(chat_id, "upload_photo")
-            with open(path, "rb") as f:
-                bot.send_photo(chat_id, f, caption=f"📸 {pending_get}")
-        else:
-            err = {"en": "Photo not found.", "ru": "Фото не найдено.", "uz": "Rasm topilmadi."}
-            bot.send_message(chat_id, err.get(user["language"], err["en"]))
+        sent = False
+        file_id = get_photo_file_id(telegram_id, pending_get)
+        if file_id:
+            try:
+                bot.send_chat_action(chat_id, "upload_photo")
+                bot.send_photo(chat_id, file_id, caption=f"📸 {pending_get}")
+                sent = True
+            except Exception:
+                logger.warning("file_id send failed for '%s' — trying local file", pending_get)
+        if not sent:
+            path = get_photo(telegram_id, pending_get)
+            if path and os.path.exists(path):
+                bot.send_chat_action(chat_id, "upload_photo")
+                with open(path, "rb") as f:
+                    bot.send_photo(chat_id, f, caption=f"📸 {pending_get}")
+            else:
+                err = {"en": "Photo not found.", "ru": "Фото не найдено.", "uz": "Rasm topilmadi."}
+                bot.send_message(chat_id, err.get(user["language"], err["en"]))
 
     # Handle Photo Vault DELETE
     pending_delete = getattr(hermes, "_pending_delete_photo", None)
@@ -259,6 +404,24 @@ def _process_and_reply(bot, chat_id, telegram_id, user, text: str) -> None:
         if delete_photo(telegram_id, pending_delete):
             msg = {"en": "Deleted.", "ru": "Удалено.", "uz": "O'chirildi."}
             bot.send_message(chat_id, f"🗑️ {msg.get(user['language'], msg['en'])}")
+
+    # Handle AI Image Generation
+    pending_image = getattr(hermes, "_pending_image_prompt", None)
+    if pending_image:
+        try:
+            bot.send_chat_action(chat_id, "upload_photo")
+            img_bytes = generate_image(pending_image)
+            if img_bytes:
+                bot.send_photo(chat_id, io.BytesIO(img_bytes), caption=f"🎨 {pending_image[:900]}")
+            else:
+                err = IMAGE_FAILED_MESSAGES.get(user["language"], IMAGE_FAILED_MESSAGES["en"])
+                bot.send_message(chat_id, err)
+        except Exception:
+            logger.error("Image generation handling failed:\n%s", traceback.format_exc())
+
+    # Handle Data Export request
+    if getattr(hermes, "_pending_export", False):
+        _send_data_export(bot, chat_id, telegram_id, user.get("language") or "en")
 
 
 def run_bot() -> None:
@@ -270,13 +433,15 @@ def run_bot() -> None:
     bot = TeleBot(token, threaded=True, num_threads=4)
     start_reminder_scheduler(bot)
 
-
+    # ------------------------------------------------------------------
+    # /broadcast (admin) — send per-language messages to every user
+    # ------------------------------------------------------------------
     @bot.message_handler(commands=["broadcast"])
     def handle_broadcast(message):
         if message.from_user.id != ADMIN_ID:
             bot.reply_to(message, "You are not authorized to use this command.")
             return
-            
+
         msg = bot.reply_to(message, "Send Uzbek text. (Type /cancel to abort)")
         bot.register_next_step_handler(msg, process_broadcast_uzbek)
 
@@ -284,7 +449,7 @@ def run_bot() -> None:
         if message.text == "/cancel":
             bot.reply_to(message, "Broadcast cancelled.")
             return
-            
+
         uzbek_msg = message
         msg = bot.reply_to(message, "Now send Russian text.")
         bot.register_next_step_handler(msg, process_broadcast_russian, uzbek_msg)
@@ -293,7 +458,7 @@ def run_bot() -> None:
         if message.text == "/cancel":
             bot.reply_to(message, "Broadcast cancelled.")
             return
-            
+
         russian_msg = message
         msg = bot.reply_to(message, "Now send English text.")
         bot.register_next_step_handler(msg, process_broadcast_english, uzbek_msg, russian_msg)
@@ -302,100 +467,157 @@ def run_bot() -> None:
         if message.text == "/cancel":
             bot.reply_to(message, "Broadcast cancelled.")
             return
-            
+
         english_msg = message
         bot.reply_to(message, "Broadcasting messages...")
-        
+
         users = get_all_users()
         success = {"uz": 0, "ru": 0, "en": 0}
-        
+
         for user in users:
             lang = user.get("language")
             if not lang:
                 lang = "en"
-                
-            msg_to_send = None
+
             if lang == "uz":
                 msg_to_send = uzbek_msg
             elif lang == "ru":
                 msg_to_send = russian_msg
             else:
                 msg_to_send = english_msg
-                
+
             try:
                 bot.copy_message(user["telegram_user_id"], msg_to_send.chat.id, msg_to_send.message_id)
                 success[lang] += 1
             except Exception as e:
                 logger.warning(f"Broadcast failed for {user['telegram_user_id']}: {e}")
-                
-        bot.reply_to(message, f"✅ Broadcast completed!
-Uzbek: {success['uz']}
-Russian: {success['ru']}
-English: {success['en']}")
 
+        bot.reply_to(
+            message,
+            f"✅ Broadcast completed!\nUzbek: {success['uz']}\nRussian: {success['ru']}\nEnglish: {success['en']}",
+        )
 
-    @bot.message_handler(commands=["broadcast"])
-    def handle_broadcast(message):
+    # ------------------------------------------------------------------
+    # /health (admin) — uptime, users, pending reminders
+    # ------------------------------------------------------------------
+    def _limit_text() -> str:
+        limit = get_daily_limit()
+        return f"{limit} msgs/user" if limit > 0 else "unlimited"
+
+    def _admin_stats_text() -> str:
+        uptime_s = int(time.time() - START_TIME)
+        hours, remainder = divmod(uptime_s, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        users = get_all_users()
+        active_today = sum(1 for u in users if get_usage_today(u["telegram_user_id"]) > 0)
+        scheduler_alive = any(t.name == "ReminderScheduler" and t.is_alive() for t in threading.enumerate())
+        return (
+            "💚 <b>Bot health</b>\n"
+            f"• Uptime: {hours}h {minutes}m {seconds}s\n"
+            f"• Users: {len(users)} (active today: {active_today})\n"
+            f"• Pending reminders: {count_pending()}\n"
+            f"• Reminder scheduler: {'alive ✅' if scheduler_alive else 'DEAD ❌'}\n"
+            f"• Daily limit: {_limit_text()}"
+        )
+
+    @bot.message_handler(commands=["health"])
+    def handle_health(message):
         if message.from_user.id != ADMIN_ID:
             bot.reply_to(message, "You are not authorized to use this command.")
             return
-            
-        msg = bot.reply_to(message, "Send Uzbek text. (Type /cancel to abort)")
-        bot.register_next_step_handler(msg, process_broadcast_uzbek)
+        bot.reply_to(message, _admin_stats_text(), parse_mode="HTML")
 
-    def process_broadcast_uzbek(message):
-        if message.text == "/cancel":
-            bot.reply_to(message, "Broadcast cancelled.")
-            return
-            
-        uzbek_msg = message
-        msg = bot.reply_to(message, "Now send Russian text.")
-        bot.register_next_step_handler(msg, process_broadcast_russian, uzbek_msg)
+    # ------------------------------------------------------------------
+    # /admin (admin) — control panel
+    # ------------------------------------------------------------------
+    def _admin_panel_markup() -> InlineKeyboardMarkup:
+        markup = InlineKeyboardMarkup()
+        markup.row(
+            InlineKeyboardButton("📊 Stats", callback_data="admin_stats"),
+            InlineKeyboardButton("👥 Users", callback_data="admin_users"),
+        )
+        markup.row(
+            InlineKeyboardButton("⚙️ Set daily limit", callback_data="admin_setlimit"),
+            InlineKeyboardButton("🔓 Remove limit", callback_data="admin_nolimit"),
+        )
+        markup.row(InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast"))
+        return markup
 
-    def process_broadcast_russian(message, uzbek_msg):
-        if message.text == "/cancel":
-            bot.reply_to(message, "Broadcast cancelled.")
-            return
-            
-        russian_msg = message
-        msg = bot.reply_to(message, "Now send English text.")
-        bot.register_next_step_handler(msg, process_broadcast_english, uzbek_msg, russian_msg)
-
-    def process_broadcast_english(message, uzbek_msg, russian_msg):
-        if message.text == "/cancel":
-            bot.reply_to(message, "Broadcast cancelled.")
-            return
-            
-        english_msg = message
-        bot.reply_to(message, "Broadcasting messages...")
-        
+    def _admin_users_text() -> str:
         users = get_all_users()
-        success = {"uz": 0, "ru": 0, "en": 0}
-        
-        for user in users:
-            lang = user.get("language")
-            if not lang:
-                lang = "en"
-                
-            msg_to_send = None
-            if lang == "uz":
-                msg_to_send = uzbek_msg
-            elif lang == "ru":
-                msg_to_send = russian_msg
-            else:
-                msg_to_send = english_msg
-                
-            try:
-                bot.copy_message(user["telegram_user_id"], msg_to_send.chat.id, msg_to_send.message_id)
-                success[lang] += 1
-            except Exception as e:
-                logger.warning(f"Broadcast failed for {user['telegram_user_id']}: {e}")
-                
-        bot.reply_to(message, f"✅ Broadcast completed!
-Uzbek: {success['uz']}
-Russian: {success['ru']}
-English: {success['en']}")
+        active_today = sum(1 for u in users if get_usage_today(u["telegram_user_id"]) > 0)
+        lines = [f"👥 <b>Users:</b> {len(users)} total, {active_today} active today", ""]
+        lines.append("<b>Newest 10:</b>")
+        for u in get_recent_users(10):
+            lines.append(
+                f"• <code>{u['telegram_user_id']}</code> | {u.get('language') or '–'} | "
+                f"today: {get_usage_today(u['telegram_user_id'])} msgs | since {(u.get('created_at') or '')[:10]}"
+            )
+        return "\n".join(lines)
 
+    @bot.message_handler(commands=["admin"])
+    def handle_admin(message):
+        if message.from_user.id != ADMIN_ID:
+            bot.reply_to(message, "You are not authorized to use this command.")
+            return
+        bot.send_message(
+            message.chat.id,
+            f"🛠 <b>Admin panel</b>\nDaily limit: <b>{_limit_text()}</b>",
+            parse_mode="HTML",
+            reply_markup=_admin_panel_markup(),
+        )
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith("admin_"))
+    def handle_admin_callback(call):
+        if call.from_user.id != ADMIN_ID:
+            bot.answer_callback_query(call.id, "Not authorized")
+            return
+
+        data = call.data
+        if data == "admin_stats":
+            bot.send_message(call.message.chat.id, _admin_stats_text(), parse_mode="HTML")
+        elif data == "admin_users":
+            bot.send_message(call.message.chat.id, _admin_users_text(), parse_mode="HTML")
+        elif data == "admin_setlimit":
+            msg = bot.send_message(
+                call.message.chat.id,
+                f"⚙️ Current daily limit: <b>{_limit_text()}</b>\n"
+                "Send the new daily message limit per user (0 = unlimited). Type /cancel to abort.",
+                parse_mode="HTML",
+            )
+            bot.register_next_step_handler(msg, process_set_limit)
+        elif data == "admin_nolimit":
+            set_daily_limit(0)
+            bot.send_message(call.message.chat.id, "✅ Daily limit removed — users are now unlimited.")
+        elif data == "admin_broadcast":
+            msg = bot.send_message(call.message.chat.id, "Send Uzbek text. (Type /cancel to abort)")
+            bot.register_next_step_handler(msg, process_broadcast_uzbek)
+        bot.answer_callback_query(call.id)
+
+    def process_set_limit(message):
+        if message.from_user.id != ADMIN_ID:
+            return
+        text = (message.text or "").strip()
+        if text == "/cancel":
+            bot.reply_to(message, "Cancelled.")
+            return
+        try:
+            new_limit = int(text)
+            if new_limit < 0:
+                raise ValueError
+        except ValueError:
+            msg = bot.reply_to(message, "❌ Please send a whole number (0 = unlimited). Type /cancel to abort.")
+            bot.register_next_step_handler(msg, process_set_limit)
+            return
+        set_daily_limit(new_limit)
+        if new_limit == 0:
+            bot.reply_to(message, "✅ Daily limit removed — users are now unlimited.")
+        else:
+            bot.reply_to(message, f"✅ Daily limit set to {new_limit} messages per user.")
+
+    # ------------------------------------------------------------------
+    # /start + language selection
+    # ------------------------------------------------------------------
     @bot.message_handler(commands=["start"])
     def handle_start(message):
         try:
@@ -424,6 +646,9 @@ English: {success['en']}")
     def handle_language_selection(call):
         telegram_id = call.from_user.id
         lang_code = call.data.split("_", 1)[1]
+        if lang_code not in ("ru", "en", "uz"):
+            bot.answer_callback_query(call.id)
+            return
         get_or_create_user(telegram_id)
         update_user_language(telegram_id, lang_code)
         bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text="✅ Language saved!")
@@ -439,6 +664,9 @@ English: {success['en']}")
         bot.send_message(call.message.chat.id, msg.get(lang, msg["en"]))
         bot.answer_callback_query(call.id)
 
+    # ------------------------------------------------------------------
+    # Voice messages → STT → normal processing
+    # ------------------------------------------------------------------
     @bot.message_handler(content_types=["voice"])
     def handle_voice(message):
         try:
@@ -473,6 +701,9 @@ English: {success['en']}")
         except Exception:
             logger.error("Voice error: %s", traceback.format_exc())
 
+    # ------------------------------------------------------------------
+    # Photos & image documents → vault save or vision analysis
+    # ------------------------------------------------------------------
     @bot.message_handler(content_types=["photo", "document"])
     def handle_photo(message):
         try:
@@ -481,9 +712,9 @@ English: {success['en']}")
             if not user:
                 handle_start(message)
                 return
-                
+
             bot.send_chat_action(message.chat.id, "typing")
-            
+
             # Find the best file to download
             file_id = None
             if message.photo:
@@ -492,16 +723,16 @@ English: {success['en']}")
                 mime = message.document.mime_type or ""
                 if "image" in mime:
                     file_id = message.document.file_id
-            
+
             if not file_id:
                 bot.send_message(message.chat.id, UNSUPPORTED_CONTENT_MESSAGES.get(user["language"], UNSUPPORTED_CONTENT_MESSAGES["en"]))
                 return
 
             file_info = bot.get_file(file_id)
             downloaded = bot.download_file(file_info.file_path)
-            
+
             caption = (message.caption or "").strip()
-            
+
             tmp_path = None
             try:
                 fd, tmp_path = tempfile.mkstemp(suffix=".jpg")
@@ -509,7 +740,6 @@ English: {success['en']}")
                     f.write(downloaded)
 
                 # If caption says 'save' or 'remember', put it in Photo Vault
-                # A simple heuristic; can be improved
                 low_cap = caption.lower()
                 if "save" in low_cap or "remember" in low_cap or "сохрани" in low_cap or "eslab" in low_cap or "saqla" in low_cap:
                     label = caption
@@ -517,11 +747,11 @@ English: {success['en']}")
                     for word in ["save this as", "save", "remember", "сохрани как", "сохрани", "saqlab qol", "saqla"]:
                         if label.lower().startswith(word):
                             label = label[len(word):].strip()
-                    
+
                     if not label:
                         label = "Document"
 
-                    if save_photo(telegram_id, label, tmp_path):
+                    if save_photo(telegram_id, label, tmp_path, file_id=file_id):
                         msg = {"en": f"✅ Saved to Photo Vault as '{label}'!", "ru": f"✅ Сохранено как '{label}'!", "uz": f"✅ '{label}' nomi bilan saqlandi!"}
                         bot.send_message(message.chat.id, msg.get(user["language"], msg["en"]))
                     else:
@@ -533,7 +763,7 @@ English: {success['en']}")
                         "ru": "Что на этой картинке? Если это текст, прочитай его.",
                         "uz": "Bu rasmda nima bor? Agar u matn bo'lsa, o'qib bering."
                     }.get(user["language"], "What is in this image?")
-                    
+
                     analysis = analyze_image(tmp_path, prompt, user["language"])
                     bot.send_message(message.chat.id, format_telegram_html(analysis), parse_mode="HTML")
 

@@ -1,6 +1,6 @@
 """
 Hermes adapter — bridges each Telegram user to an isolated
-OpenAI-backed profile with persistent memory, conversation history,
+OpenRouter-backed profile with persistent memory, conversation history,
 dynamic timezone detection, and real timer / reminder scheduling.
 """
 
@@ -15,12 +15,25 @@ from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
 from app.reminders.manager import add_reminder, get_pending_reminders, cancel_reminder
-from app.users.manager import get_user, update_user_timezone
+from app.users.manager import (
+    get_user,
+    update_user_timezone,
+    update_user_city,
+    update_voice_mode,
+    update_briefing_enabled,
+    update_briefing_time,
+    update_calorie_goal,
+)
 from app.contacts.manager import save_contact, get_all_contacts
 from app.search.web import web_search, format_search_results
 from app.currency.converter import convert_currency
 from app.prayer.times import get_prayer_times
 from app.photo_vault.manager import list_photos
+from app.lists.manager import add_item, remove_item, clear_list, get_all_lists
+from app.expenses.manager import add_expense, get_recent_expenses, get_month_totals
+from app.calories.manager import log_food, get_day_total
+from app.events.manager import add_event, delete_event, get_upcoming_events
+from app.weather.forecast import get_weather
 
 logger = logging.getLogger(__name__)
 
@@ -39,30 +52,36 @@ def _get_user_lock(profile_id: str) -> threading.Lock:
 
 
 # ---------------------------------------------------------------------------
-# Singleton OpenAI client
+# Singleton OpenRouter client (OpenAI-compatible API)
 # ---------------------------------------------------------------------------
-_openai_client = None
-_openai_client_lock = threading.Lock()
+_openrouter_client = None
+_openrouter_client_lock = threading.Lock()
+
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 
-def _get_openai_client():
-    """Return a shared OpenAI client or None when unavailable."""
-    global _openai_client
-    if _openai_client is not None:
-        return _openai_client
-    with _openai_client_lock:
-        if _openai_client is not None:
-            return _openai_client
-        api_key = os.environ.get("OPENAI_API_KEY")
+def _get_openrouter_client():
+    """Return a shared OpenRouter client or None when unavailable."""
+    global _openrouter_client
+    if _openrouter_client is not None:
+        return _openrouter_client
+    with _openrouter_client_lock:
+        if _openrouter_client is not None:
+            return _openrouter_client
+        api_key = os.environ.get("OPENROUTER_API_KEY")
         if not api_key:
-            logger.warning("OPENAI_API_KEY not set — LLM calls disabled")
+            logger.warning("OPENROUTER_API_KEY not set — LLM calls disabled")
             return None
         try:
             import openai
-            _openai_client = openai.OpenAI(api_key=api_key)
-            return _openai_client
+            _openrouter_client = openai.OpenAI(
+                api_key=api_key,
+                base_url=OPENROUTER_BASE_URL,
+                default_headers={"X-Title": "Leyla Assistant"},
+            )
+            return _openrouter_client
         except Exception as exc:
-            logger.error("Failed to initialise OpenAI client: %s", exc)
+            logger.error("Failed to initialise OpenRouter client: %s", exc)
             return None
 
 
@@ -116,7 +135,21 @@ class HermesAdapter:
         os.makedirs(self.profile_dir, exist_ok=True)
         self.memory_file = os.path.join(self.profile_dir, "memory.json")
         self.history_file = os.path.join(self.profile_dir, "history.json")
-        self.model = os.environ.get("OPENAI_MODEL", "gpt-5.6-luna")
+        self.model = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+
+    # ---- User-local time helpers ------------------------------------------
+
+    def _user_tz(self):
+        """Resolved tzinfo for this user, or None when unknown."""
+        user = get_user(self.telegram_user_id) if self.telegram_user_id else None
+        tz_str = (user.get("timezone", "") or "").strip() if user else ""
+        return parse_user_timezone(tz_str) if tz_str else None
+
+    def _user_local_today(self) -> str:
+        """'YYYY-MM-DD' in the user's timezone (UTC fallback)."""
+        tz = self._user_tz()
+        now = datetime.now(tz) if tz else datetime.now(timezone.utc)
+        return now.strftime("%Y-%m-%d")
 
     # ---- JSON I/O (atomic writes) ----------------------------------------
 
@@ -173,7 +206,7 @@ class HermesAdapter:
                 f"• When setting reminders for a specific clock time (e.g. 'at 18:00', 'tomorrow 09:00'), "
                 f"calculate the exact seconds difference from their local time ({user_local_now.strftime('%H:%M')}).\n"
                 f"• If the user mentions moving or changing their city/country (e.g. 'I am in Dubai now' or 'Men Toshkentdaman'), "
-                f"update their timezone by appending `[SET_TIMEZONE: <IANA_or_offset>]`.\n"
+                f"update their timezone by appending `[SET_TIMEZONE: <IANA_or_offset>]` and their city with `[SET_CITY: <city in English>]`.\n"
             )
         else:
             tz_section = (
@@ -193,6 +226,7 @@ class HermesAdapter:
                 "    2. Once the user replies with their city or country (e.g. 'Toshkent', 'Ташкент', 'Moskva', 'Самарканд', 'New York', 'Dubai', 'UTC+5'):\n"
                 "       - Identify the matching IANA timezone (e.g. Asia/Tashkent, Europe/Moscow, Asia/Dubai, etc.) or UTC offset.\n"
                 "       - Append `[SET_TIMEZONE: <IANA_timezone_or_offset>]` to your reply.\n"
+                "       - Also append `[SET_CITY: <city name in English>]` so live weather and prayer times work for them.\n"
                 "       - Calculate the delay from their local time and append `[REMINDER: <seconds> | <text>]`.\n"
                 "       - Warmly confirm their city/timezone has been saved and the reminder is set!\n"
             )
@@ -212,6 +246,12 @@ class HermesAdapter:
             "and engaging (e.g. 😊, ✨, 💡, 📝, 🌸, 🎯, 👍, 💫, 💬, 🚀, ❤️, 📚, ☕, ⏰).\n"
             "• Use **bold** (double asterisks) for emphasis, section titles, and key terms.\n"
             "• Keep responses well-structured with bullet points, numbered lists, and clean spacing.\n\n"
+            "⚙️ FUNCTION TAGS (CRITICAL SYSTEM RULE):\n"
+            "• Many capabilities below work ONLY through bracketed tags such as [REMINDER: ...], [LIST_ADD: ...], "
+            "[EXPENSE: ...], [LOG_FOOD: ...], [ADD_EVENT: ...], [SET_TIMEZONE: ...].\n"
+            "• Tags are executed by the system and REMOVED from your message — the user never sees them.\n"
+            "• NEVER claim you saved, logged, set, added, or deleted something without appending the matching tag "
+            "in that SAME reply. Without the tag, the action simply does not happen.\n\n"
             "⏰ TIMERS & REMINDERS (NATIVE CAPABILITY):\n"
             "• You HAVE full ability to set real timers, alarms, and reminders for the user!\n"
             "• NEVER tell the user that you cannot set timers, alarms, or reminders. You CAN and MUST!\n"
@@ -273,6 +313,51 @@ class HermesAdapter:
             "  3. Append `[SET_TRANSLATOR: <lang_code>]` where lang_code is the normalized code (e.g. zh, en, ru, de, fr, ar, ko, ja, tr, uz).\n"
             "  4. Warmly confirm that translator mode is now ON.\n"
             "• If user asks to turn off translator (e.g. 'turn off translator', 'выключи переводчик'), append `[SET_TRANSLATOR: off]`.\n\n"
+            "📝 LISTS — SHOPPING / TO-DO (NATIVE CAPABILITY, SAVED IN DATABASE):\n"
+            "• You have REAL persistent lists stored in a database — they NEVER get forgotten, even after weeks!\n"
+            "• When the user adds something to a list (e.g. 'add milk to my shopping list', 'добавь молоко в список покупок', 'xarid ro\\'yxatiga sut qo\\'sh'), "
+            "append `[LIST_ADD: <list_name> | <item>]`.\n"
+            "• When the user removes an item (e.g. 'remove milk from shopping list'), append `[LIST_REMOVE: <list_name> | <item>]`.\n"
+            "• When the user clears a whole list (e.g. 'clear my shopping list'), append `[LIST_CLEAR: <list_name>]`.\n"
+            "• Use short lowercase English list names (e.g. 'shopping', 'todo'). The current lists are in the 'User Lists' section below — read items from there when asked.\n\n"
+            "💸 EXPENSE TRACKER (NATIVE CAPABILITY, SAVED IN DATABASE):\n"
+            "• When the user says they spent money (e.g. 'I spent 50k som on lunch', 'потратил 20 долларов на такси', 'tushlikka 30 ming so\\'m sarfladim'), "
+            "append `[EXPENSE: <amount> | <currency> | <category> | <note>]` (amount = plain number, e.g. 50000; currency = ISO code like UZS/USD).\n"
+            "• Recent expenses and this month's totals are in the 'User Expenses' section below — use them to answer questions like 'how much did I spend this month?'.\n\n"
+            "📊 CALORIE COUNTER (NATIVE CAPABILITY, SAVED IN DATABASE):\n"
+            "• When the user tells you what they ate (e.g. 'I ate two plates of plov', 'съел борщ и хлеб', 'ikkita olma yedim'), "
+            "estimate the calories yourself and append `[LOG_FOOD: <short description> | <estimated kcal number>]` (one tag per item, kcal = plain number like 450).\n"
+            "• CRITICAL: The food is saved ONLY by the tag — if you do not append `[LOG_FOOD: ...]`, NOTHING is logged. "
+            "NEVER claim you logged food without appending the tag to that same reply.\n"
+            "• Confirm what you logged and report today's running total (see 'Calories Today' section below).\n"
+            "• If the user sets a daily goal (e.g. 'my goal is 2000 kcal'), append `[CALORIE_GOAL: <number>]`.\n\n"
+            "🎂 BIRTHDAYS & YEARLY EVENTS (NATIVE CAPABILITY, SAVED IN DATABASE):\n"
+            "• You can remember birthdays and yearly events FOREVER and congratulate automatically every year!\n"
+            "• When the user gives a birthday or yearly event (e.g. 'My mom's birthday is March 15', 'день рождения Алины 20 мая', 'Onamning tug\\'ilgan kuni 5-aprel'), "
+            "append `[ADD_EVENT: <name> | <YYYY-MM-DD> | <type>]` — the date MUST be in YYYY-MM-DD format, type is 'birthday' or 'event'.\n"
+            "• CRITICAL: The event is saved ONLY by the tag — if you do not append `[ADD_EVENT: ...]`, NOTHING is saved. "
+            "NEVER claim you saved a birthday without appending the tag to that same reply.\n"
+            "• To delete, append `[DELETE_EVENT: <name>]`.\n"
+            "• Upcoming events are listed in the 'Upcoming Events' section below.\n\n"
+            "🌤️ LIVE WEATHER (NATIVE CAPABILITY):\n"
+            "• When the user asks about weather (e.g. 'weather in Tashkent', 'погода в Москве', 'bugun ob-havo qanday'), "
+            "append `[WEATHER: <city in English>]` to your response. If no city is given and the user's city is known, use it.\n\n"
+            "🎨 IMAGE GENERATION (NATIVE CAPABILITY):\n"
+            "• You CAN generate real images! When the user asks to draw/create/generate a picture "
+            "(e.g. 'draw a cat in space', 'нарисуй закат над горами', 'sahro rasmini chiz'), "
+            "append `[GENERATE_IMAGE: <detailed English image prompt>]` and tell the user the image is being created.\n\n"
+            "📦 DATA EXPORT (NATIVE CAPABILITY):\n"
+            "• The user can download ALL their data (profile, memories, contacts, lists, expenses, calories, events, saved photos) as a file.\n"
+            "• When the user asks to export/download/get their data (e.g. 'export my data', 'пришли мне мои данные', 'ma\\'lumotlarimni yuklab olmoqchiman'), "
+            "append `[EXPORT_DATA]` and tell them the file is being prepared.\n\n"
+            "🗣️ VOICE REPLY MODES:\n"
+            "• The user can receive your replies as text, voice, or both.\n"
+            "• If the user asks to change it (e.g. 'answer me with voice only', 'отвечай только голосом', 'faqat ovozli javob ber', 'send both text and voice'), "
+            "append `[SET_VOICE_MODE: voice]`, `[SET_VOICE_MODE: text]`, or `[SET_VOICE_MODE: both]`.\n\n"
+            "🌅 MORNING BRIEFING:\n"
+            "• Every morning you automatically send the user weather + prayer times + pending reminders.\n"
+            "• If the user wants to enable/disable it, append `[SET_BRIEFING: on]` or `[SET_BRIEFING: off]`.\n"
+            "• If the user wants it at a specific time (e.g. 'send briefing at 7:30'), append `[BRIEFING_TIME: HH:MM]`.\n\n"
             "LANGUAGE SWITCHING RULES:\n"
             "• If the user EXPLICITLY asks to change the conversation language "
             "(e.g. 'Speak English', 'Давай по-русски', 'Endi o\\'zbekcha gaplashamiz'), "
@@ -318,6 +403,63 @@ class HermesAdapter:
         except Exception as e:
             logger.debug("Could not load photo vault for prompt: %s", e)
 
+        # Inject user lists (shopping, todo, ...)
+        try:
+            user_lists = get_all_lists(self.telegram_user_id)
+            if user_lists:
+                l_lines = [f"- {name}: {', '.join(items)}" for name, items in user_lists.items()]
+                prompt += "\nUser Lists (stored in database, always up to date):\n" + "\n".join(l_lines) + "\n"
+        except Exception as e:
+            logger.debug("Could not load lists for prompt: %s", e)
+
+        # Inject expenses: this month's totals + recent entries
+        try:
+            today = self._user_local_today()
+            totals = get_month_totals(self.telegram_user_id, today[:7])
+            recent = get_recent_expenses(self.telegram_user_id, limit=10)
+            if totals or recent:
+                exp_lines = []
+                if totals:
+                    total_str = ", ".join(f"{t['total']:,.0f} {t['currency']}" for t in totals)
+                    exp_lines.append(f"This month ({today[:7]}) total: {total_str}")
+                for r in recent:
+                    desc = r["note"] or r["category"] or "expense"
+                    exp_lines.append(f"- {r['spent_date']}: {r['amount']:,.0f} {r['currency']} ({desc})")
+                prompt += "\nUser Expenses (stored in database):\n" + "\n".join(exp_lines) + "\n"
+        except Exception as e:
+            logger.debug("Could not load expenses for prompt: %s", e)
+
+        # Inject today's calorie total
+        try:
+            user = get_user(self.telegram_user_id) if self.telegram_user_id else None
+            goal = int(user.get("calorie_goal", 0) or 0) if user else 0
+            today_total = get_day_total(self.telegram_user_id, self._user_local_today())
+            if today_total > 0 or goal > 0:
+                goal_str = f" / goal {goal}" if goal > 0 else ""
+                prompt += f"\nCalories Today: {today_total} kcal{goal_str}\n"
+        except Exception as e:
+            logger.debug("Could not load calories for prompt: %s", e)
+
+        # Inject upcoming birthdays / events
+        try:
+            tz = self._user_tz()
+            today_d = datetime.now(tz).date() if tz else datetime.now(timezone.utc).date()
+            upcoming = get_upcoming_events(self.telegram_user_id, today_d, days=40)
+            if upcoming:
+                ev_lines = [f"- {e['name']} ({e['event_type']}): {e['next_date']} (in {e['in_days']} days)" for e in upcoming]
+                prompt += "\nUpcoming Events (birthdays etc., saved in database):\n" + "\n".join(ev_lines) + "\n"
+        except Exception as e:
+            logger.debug("Could not load events for prompt: %s", e)
+
+        # Inject known city for weather defaults
+        try:
+            user = get_user(self.telegram_user_id) if self.telegram_user_id else None
+            city = (user.get("city", "") or "").strip() if user else ""
+            if city:
+                prompt += f"\nUser's City: {city} (use as default for weather/prayer requests)\n"
+        except Exception as e:
+            logger.debug("Could not load city for prompt: %s", e)
+
         return prompt
 
 
@@ -330,7 +472,7 @@ class HermesAdapter:
             history = self._read_json(self.history_file)
             memory = self._read_json(self.memory_file)
 
-            client = _get_openai_client()
+            client = _get_openrouter_client()
             if client is None:
                 response = self._mock_llm_response(message, current_lang, memory)
             else:
@@ -432,6 +574,140 @@ class HermesAdapter:
             self._pending_delete_photo = delete_photo_matches[-1].strip() if delete_photo_matches else None
             response = re.sub(r"\[DELETE_PHOTO:\s*.+?\]", "", response).strip()
 
+            # Process [SET_CITY: <city>] tags
+            city_matches = re.findall(r"\[SET_CITY:\s*(.+?)\]", response)
+            for city_val in city_matches:
+                try:
+                    update_user_city(self.telegram_user_id, city_val.strip())
+                    logger.info("Updated city for user %d to %s", self.telegram_user_id, city_val.strip())
+                except Exception as exc:
+                    logger.error("Failed to update user city: %s", exc)
+            response = re.sub(r"\[SET_CITY:\s*.+?\]", "", response).strip()
+
+            # Process list tags: [LIST_ADD: <list> | <item>], [LIST_REMOVE: ...], [LIST_CLEAR: <list>]
+            for list_name, item in re.findall(r"\[LIST_ADD:\s*(.+?)\s*\|\s*(.+?)\]", response):
+                try:
+                    add_item(self.telegram_user_id, list_name, item)
+                    logger.info("List add for user %d: %s | %s", self.telegram_user_id, list_name, item)
+                except Exception as exc:
+                    logger.error("Failed to add list item: %s", exc)
+            response = re.sub(r"\[LIST_ADD:\s*.+?\]", "", response).strip()
+
+            for list_name, item in re.findall(r"\[LIST_REMOVE:\s*(.+?)\s*\|\s*(.+?)\]", response):
+                try:
+                    remove_item(self.telegram_user_id, list_name, item)
+                except Exception as exc:
+                    logger.error("Failed to remove list item: %s", exc)
+            response = re.sub(r"\[LIST_REMOVE:\s*.+?\]", "", response).strip()
+
+            for list_name in re.findall(r"\[LIST_CLEAR:\s*(.+?)\]", response):
+                try:
+                    clear_list(self.telegram_user_id, list_name)
+                except Exception as exc:
+                    logger.error("Failed to clear list: %s", exc)
+            response = re.sub(r"\[LIST_CLEAR:\s*.+?\]", "", response).strip()
+
+            # Process [EXPENSE: <amount> | <currency> | <category> | <note>] tags
+            expense_matches = re.findall(r"\[EXPENSE:\s*([\d.,]+)\s*\|\s*([A-Za-z]+)\s*\|\s*([^|\]]+?)\s*\|\s*(.+?)\]", response)
+            for amount_s, cur_s, cat_s, note_s in expense_matches:
+                try:
+                    amount = float(amount_s.replace(",", "").replace(" ", ""))
+                    add_expense(
+                        self.telegram_user_id,
+                        amount,
+                        cur_s.strip(),
+                        cat_s.strip(),
+                        note_s.strip(),
+                        self._user_local_today(),
+                    )
+                    logger.info("Logged expense for user %d: %s %s", self.telegram_user_id, amount_s, cur_s)
+                except Exception as exc:
+                    logger.error("Failed to log expense: %s", exc)
+            response = re.sub(r"\[EXPENSE:\s*.+?\]", "", response).strip()
+
+            # Process [LOG_FOOD: <description> | <kcal>] tags
+            food_matches = re.findall(r"\[LOG_FOOD:\s*(.+?)\s*\|\s*(\d+)\s*\]", response)
+            response = re.sub(r"\[LOG_FOOD:\s*.+?\]", "", response).strip()
+            for desc, kcal in food_matches:
+                try:
+                    log_food(self.telegram_user_id, desc.strip(), int(kcal), self._user_local_today())
+                    logger.info("Logged food for user %d: %s (%s kcal)", self.telegram_user_id, desc, kcal)
+                except Exception as exc:
+                    logger.error("Failed to log food: %s", exc)
+
+            # Process [CALORIE_GOAL: <number>] tags
+            goal_matches = re.findall(r"\[CALORIE_GOAL:\s*(\d+)\]", response)
+            for goal_s in goal_matches:
+                try:
+                    update_calorie_goal(self.telegram_user_id, int(goal_s))
+                except Exception as exc:
+                    logger.error("Failed to set calorie goal: %s", exc)
+            response = re.sub(r"\[CALORIE_GOAL:\s*\d+\]", "", response).strip()
+
+            # Process [ADD_EVENT: <name> | <YYYY-MM-DD> | <type>] tags (type optional)
+            event_matches = re.findall(r"\[ADD_EVENT:\s*(.+?)\s*\|\s*(\d{4}-\d{2}-\d{2})\s*(?:\|\s*(.+?))?\]", response)
+            for ev_name, ev_date, ev_type in event_matches:
+                try:
+                    add_event(self.telegram_user_id, ev_name.strip(), ev_date.strip(), (ev_type or "birthday").strip())
+                    logger.info("Added event for user %d: %s on %s", self.telegram_user_id, ev_name, ev_date)
+                except Exception as exc:
+                    logger.error("Failed to add event: %s", exc)
+            response = re.sub(r"\[ADD_EVENT:\s*.+?\]", "", response).strip()
+
+            # Process [DELETE_EVENT: <name>] tags
+            for ev_name in re.findall(r"\[DELETE_EVENT:\s*(.+?)\]", response):
+                try:
+                    delete_event(self.telegram_user_id, ev_name.strip())
+                except Exception as exc:
+                    logger.error("Failed to delete event: %s", exc)
+            response = re.sub(r"\[DELETE_EVENT:\s*.+?\]", "", response).strip()
+
+            # Process [WEATHER: <city>] tags — inject live weather
+            weather_matches = re.findall(r"\[WEATHER:\s*(.+?)\]", response)
+            response = re.sub(r"\[WEATHER:\s*.+?\]", "", response).strip()
+            for city_q in weather_matches:
+                try:
+                    weather_text = get_weather(city_q.strip(), lang=current_lang)
+                    response = response + "\n\n" + weather_text
+                except Exception as exc:
+                    logger.error("Weather fetch failed: %s", exc)
+
+            # Process [GENERATE_IMAGE: <prompt>] — store for bot.py
+            image_matches = re.findall(r"\[GENERATE_IMAGE:\s*(.+?)\]", response)
+            self._pending_image_prompt = image_matches[-1].strip() if image_matches else None
+            response = re.sub(r"\[GENERATE_IMAGE:\s*.+?\]", "", response).strip()
+
+            # Process [EXPORT_DATA] — store for bot.py
+            self._pending_export = bool(re.search(r"\[EXPORT_DATA\]", response))
+            response = re.sub(r"\[EXPORT_DATA\]", "", response).strip()
+
+            # Process [SET_VOICE_MODE: voice|text|both] tags
+            voice_mode_matches = re.findall(r"\[SET_VOICE_MODE:\s*(voice|text|both)\]", response, re.IGNORECASE)
+            for mode_val in voice_mode_matches:
+                try:
+                    update_voice_mode(self.telegram_user_id, mode_val.lower())
+                    logger.info("Voice mode for user %d set to %s", self.telegram_user_id, mode_val)
+                except Exception as exc:
+                    logger.error("Failed to set voice mode: %s", exc)
+            response = re.sub(r"\[SET_VOICE_MODE:\s*.+?\]", "", response).strip()
+
+            # Process [SET_BRIEFING: on|off] and [BRIEFING_TIME: HH:MM] tags
+            briefing_matches = re.findall(r"\[SET_BRIEFING:\s*(on|off)\]", response, re.IGNORECASE)
+            for flag in briefing_matches:
+                try:
+                    update_briefing_enabled(self.telegram_user_id, flag.lower() == "on")
+                except Exception as exc:
+                    logger.error("Failed to set briefing: %s", exc)
+            response = re.sub(r"\[SET_BRIEFING:\s*.+?\]", "", response).strip()
+
+            btime_matches = re.findall(r"\[BRIEFING_TIME:\s*(\d{1,2}:\d{2})\]", response)
+            for t_val in btime_matches:
+                try:
+                    update_briefing_time(self.telegram_user_id, t_val)
+                except Exception as exc:
+                    logger.error("Failed to set briefing time: %s", exc)
+            response = re.sub(r"\[BRIEFING_TIME:\s*\d{1,2}:\d{2}\]", "", response).strip()
+
             history.append({"role": "user", "content": message})
             history.append({"role": "assistant", "content": response})
             self._write_json(self.history_file, history[-MAX_HISTORY_TURNS:])
@@ -467,7 +743,7 @@ class HermesAdapter:
 
             return reply
         except Exception as exc:
-            logger.error("OpenAI API error for %s: %s", self.profile_id, exc)
+            logger.error("OpenRouter API error for %s: %s", self.profile_id, exc)
             error_msgs = {
                 "ru": "Произошла ошибка при обработке запроса. Попробуйте ещё раз.",
                 "en": "Something went wrong. Please try again.",
@@ -486,9 +762,27 @@ class HermesAdapter:
         if "o'zbekcha" in low or "o'zbek" in low:
             return "Xo'p, endi o'zbekchada gaplashaman. [LANGUAGE_CHANGED_TO: uz]"
         if "toshkent" in low or "tashkent" in low or "ташкент" in low:
-            return "Toshkent vaqti saqlandi! [SET_TIMEZONE: Asia/Tashkent]"
+            return "Toshkent vaqti saqlandi! [SET_TIMEZONE: Asia/Tashkent] [SET_CITY: Tashkent]"
         if "remind me in" in low or "taymer" in low or "напомни" in low or "eslat" in low:
             return "Timer set! [REMINDER: 10 | Test reminder]"
+        if "shopping list" in low and "add" in low:
+            item = message[low.find("add") + len("add"):low.find("to my shopping list")].strip() or "item"
+            return f"Added! [LIST_ADD: shopping | {item}]"
+        if "remove" in low and "shopping list" in low:
+            item = message[low.find("remove") + len("remove"):low.find("from my shopping list")].strip() or "item"
+            return f"Removed! [LIST_REMOVE: shopping | {item}]"
+        if "what is on my shopping list" in low or "what's on my shopping list" in low:
+            lists = get_all_lists(self.telegram_user_id)
+            items = lists.get("shopping", [])
+            return "Your shopping list: " + (", ".join(items) if items else "(empty)")
+        if "i spent" in low:
+            return "Logged! [EXPENSE: 25 | USD | food | lunch]"
+        if "i ate" in low:
+            return "Logged! [LOG_FOOD: test meal | 500]"
+        if "birthday is" in low:
+            return "Saved! [ADD_EVENT: Test Person | 1990-05-15 | birthday]"
+        if "export" in low:
+            return "Preparing your data export! [EXPORT_DATA]"
         if "my name is" in low:
             name = message[low.find("my name is") + len("my name is"):].strip()
             memory.append({"type": "name", "value": name})

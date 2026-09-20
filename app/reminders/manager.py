@@ -86,6 +86,24 @@ def get_due_reminders(limit: int = 20) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def get_next_pending_time() -> int | None:
+    """Unix timestamp of the soonest pending reminder, or None if there are none."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT MIN(remind_at) AS next_at FROM reminders WHERE status = 'pending'"
+        ).fetchone()
+        return int(row["next_at"]) if row and row["next_at"] is not None else None
+
+
+def count_pending() -> int:
+    """Total number of pending reminders across all users."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM reminders WHERE status = 'pending'"
+        ).fetchone()
+        return int(row["n"])
+
+
 def mark_reminder_completed(reminder_id: int) -> None:
     """Mark a reminder as completed once sent."""
     with get_db() as conn:

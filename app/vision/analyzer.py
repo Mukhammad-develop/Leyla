@@ -1,8 +1,7 @@
 """
-Vision analyzer — sends images to GPT-4o for analysis.
+Vision analyzer — sends images to a vision-capable model via OpenRouter.
 
-Used for: Read This For Me (OCR), Plant/Food identifier, Photo Vault descriptions.
-We deliberately use gpt-4o here because gpt-5.6-luna does not accept image inputs.
+Used for: Read This For Me (OCR), document reading, Photo Vault descriptions.
 """
 
 import base64
@@ -10,6 +9,8 @@ import logging
 import os
 
 logger = logging.getLogger(__name__)
+
+ASSISTANT_NAMES = {"ru": "Лейла", "en": "Laila", "uz": "Laylo"}
 
 
 def _encode_image(image_path: str) -> str:
@@ -20,16 +21,20 @@ def _encode_image(image_path: str) -> str:
 
 def analyze_image(image_path: str, user_prompt: str, lang: str = "en") -> str:
     """
-    Send an image to GPT-4o Vision with a user-defined prompt.
+    Send an image to a vision model with a user-defined prompt.
     Returns the model's text response, or an error string.
     """
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         return _error_msg(lang, "no_api_key")
 
     try:
         import openai
-        client = openai.OpenAI(api_key=api_key)
+        client = openai.OpenAI(
+            api_key=api_key,
+            base_url="https://openrouter.ai/api/v1",
+            default_headers={"X-Title": "Leyla Assistant"},
+        )
 
         b64 = _encode_image(image_path)
         ext = os.path.splitext(image_path)[1].lower().lstrip(".")
@@ -45,14 +50,15 @@ def analyze_image(image_path: str, user_prompt: str, lang: str = "en") -> str:
             "en": "Reply in English.",
         }.get(lang, "Reply in English.")
 
+        name = ASSISTANT_NAMES.get(lang, "Laila")
         system = (
-            f"You are Laila, a helpful personal assistant. {lang_instruction} "
+            f"You are {name}, a helpful personal assistant. {lang_instruction} "
             "Be concise, warm, and use emojis where appropriate. "
             "Use **bold** for key terms."
         )
 
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model=os.environ.get("OPENROUTER_VISION_MODEL", "openai/gpt-4o"),
             messages=[
                 {"role": "system", "content": system},
                 {

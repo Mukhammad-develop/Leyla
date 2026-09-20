@@ -64,19 +64,33 @@ def _lang_display_name(lang: str) -> str:
     return LANG_NAMES.get(lang.lower(), lang)
 
 
+def _get_openrouter_client():
+    """Shared OpenRouter client (OpenAI-compatible), or None when not configured."""
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        return None
+    try:
+        import openai
+        return openai.OpenAI(
+            api_key=api_key,
+            base_url="https://openrouter.ai/api/v1",
+            default_headers={"X-Title": "Leyla Assistant"},
+        )
+    except Exception as exc:
+        logger.error("Failed to initialise OpenRouter client: %s", exc)
+        return None
+
+
 def translate_text(text: str, target_lang: str) -> str:
     """
     Translate text to target_lang using the LLM.
     Returns the translated string (with pinyin appended on a new line if Chinese).
     """
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
+    client = _get_openrouter_client()
+    if client is None:
         return text
 
     try:
-        import openai
-        client = openai.OpenAI(api_key=api_key)
-
         lang_display = _lang_display_name(target_lang)
         pinyin_note = (
             " After the translation, on a NEW SEPARATE LINE, add the full pinyin pronunciation of the Chinese text."
@@ -94,7 +108,7 @@ def translate_text(text: str, target_lang: str) -> str:
         )
 
         completion = client.chat.completions.create(
-            model=os.environ.get("OPENAI_MODEL", "gpt-5.6-luna"),
+            model=os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini"),
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": text},

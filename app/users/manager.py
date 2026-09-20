@@ -88,3 +88,71 @@ def get_all_users() -> list[dict]:
     with get_db() as conn:
         rows = conn.execute("SELECT * FROM users").fetchall()
         return [dict(r) for r in rows]
+
+
+def get_recent_users(limit: int = 10) -> list[dict]:
+    """Newest users first (for the admin panel)."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM users ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_user_city(telegram_id: int, city: str) -> None:
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE users SET city = ? WHERE telegram_user_id = ?",
+            (city.strip(), telegram_id),
+        )
+        conn.commit()
+
+
+def update_voice_mode(telegram_id: int, mode: str) -> None:
+    """Set reply mode: 'text', 'voice', or 'both'."""
+    if mode not in ("text", "voice", "both"):
+        return
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE users SET voice_mode = ? WHERE telegram_user_id = ?",
+            (mode, telegram_id),
+        )
+        conn.commit()
+
+
+def update_briefing_enabled(telegram_id: int, enabled: bool) -> None:
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE users SET briefing_enabled = ? WHERE telegram_user_id = ?",
+            (1 if enabled else 0, telegram_id),
+        )
+        conn.commit()
+
+
+def update_briefing_time(telegram_id: int, time_str: str) -> None:
+    """Set daily briefing time, expected 'HH:MM' (user local)."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE users SET briefing_time = ? WHERE telegram_user_id = ?",
+            (time_str.strip(), telegram_id),
+        )
+        conn.commit()
+
+
+def update_briefing_last_sent(telegram_id: int, date_str: str) -> None:
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE users SET briefing_last_sent = ? WHERE telegram_user_id = ?",
+            (date_str, telegram_id),
+        )
+        conn.commit()
+
+
+def update_calorie_goal(telegram_id: int, goal: int) -> None:
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE users SET calorie_goal = ? WHERE telegram_user_id = ?",
+            (max(0, int(goal)), telegram_id),
+        )
+        conn.commit()

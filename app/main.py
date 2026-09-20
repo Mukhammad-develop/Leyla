@@ -5,6 +5,7 @@ Entry point — single long-running process for PythonAnywhere Always-on Task.
 import logging
 import os
 import sys
+import time
 
 # ---------------------------------------------------------------------------
 # 1. Fix sys.path FIRST so `app.*` imports resolve no matter how we're called
@@ -42,19 +43,33 @@ def main() -> None:
         )
         sys.exit(1)
 
-    api_key = os.environ.get("OPENAI_API_KEY", "")
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
     if not api_key:
         logger.warning(
-            "OPENAI_API_KEY is not set — bot will use mock responses."
+            "OPENROUTER_API_KEY is not set — bot will use mock responses."
         )
 
-    model = os.environ.get("OPENAI_MODEL", "gpt-5.6-luna")
-    logger.info("OpenAI model: %s", model)
+    model = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+    logger.info("OpenRouter model: %s", model)
 
     init_db()
     logger.info("Database initialised")
 
-    run_bot()  # blocks forever (infinity_polling)
+    # Auto-restart loop: if the polling loop crashes, wait and start again
+    # instead of taking every user offline. (PythonAnywhere always-on tasks
+    # also restart the process, this is the in-process safety net.)
+    restart_delay = 5
+    while True:
+        try:
+            run_bot()  # blocks forever (infinity_polling)
+            logger.warning("run_bot() returned unexpectedly — restarting in %ds", restart_delay)
+        except KeyboardInterrupt:
+            logger.info("Shutting down (KeyboardInterrupt)")
+            break
+        except Exception:
+            logger.exception("Bot crashed — restarting in %ds", restart_delay)
+        time.sleep(restart_delay)
+        restart_delay = min(restart_delay * 2, 300)
 
 
 if __name__ == "__main__":

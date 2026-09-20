@@ -28,15 +28,15 @@ def get_prayer_times(city: str, country: str = "", lang: str = "en") -> str:
     Fetch today's prayer times for a city and return a formatted string.
     """
     try:
-        params = {"city": city, "method": 2}
         if country:
-            params["country"] = country
+            url = "https://api.aladhan.com/v1/timingsByCity"
+            params = {"city": city, "country": country, "method": 2}
+        else:
+            # timingsByAddress works with a bare city name (no country needed)
+            url = "https://api.aladhan.com/v1/timingsByAddress"
+            params = {"address": city, "method": 2}
 
-        resp = requests.get(
-            "http://api.aladhan.com/v1/timingsByCity",
-            params=params,
-            timeout=10,
-        )
+        resp = requests.get(url, params=params, timeout=10)
         data = resp.json()
 
         if data.get("code") != 200:

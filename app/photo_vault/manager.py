@@ -20,9 +20,17 @@ def _vault_dir(telegram_user_id: int, label: str) -> str:
     return os.path.join(data_dir, "photo_vault", str(telegram_user_id), safe_label)
 
 
-def save_photo(telegram_user_id: int, label: str, src_path: str, file_type: str = "photo") -> bool:
+def save_photo(
+    telegram_user_id: int,
+    label: str,
+    src_path: str,
+    file_type: str = "photo",
+    file_id: str = "",
+) -> bool:
     """
     Copy a file from src_path into the vault directory and record it in the DB.
+    The Telegram file_id is stored alongside, so the photo can be re-sent from
+    Telegram's servers even if the local copy is lost.
     If a photo with the same label already exists, it is overwritten.
     Returns True on success, False on failure.
     """
@@ -39,8 +47,8 @@ def save_photo(telegram_user_id: int, label: str, src_path: str, file_type: str 
                 (telegram_user_id, label.strip()),
             )
             conn.execute(
-                "INSERT INTO photo_vault (telegram_user_id, label, file_path, file_type) VALUES (?, ?, ?, ?)",
-                (telegram_user_id, label.strip(), dest_path, file_type),
+                "INSERT INTO photo_vault (telegram_user_id, label, file_path, file_type, file_id) VALUES (?, ?, ?, ?, ?)",
+                (telegram_user_id, label.strip(), dest_path, file_type, file_id),
             )
             conn.commit()
         return True
@@ -50,23 +58,38 @@ def save_photo(telegram_user_id: int, label: str, src_path: str, file_type: str 
 
 
 def get_photo(telegram_user_id: int, label: str) -> str | None:
-    """Return the file path for a saved photo, or None if not found."""
+    """Return the local file path for a saved photo, or None if not found."""
+    row = _find_photo_row(telegram_user_id, label)
+    if row:
+        path = row["file_path"]
+        return path if os.path.exists(path) else None
+    return None
+
+
+def _find_photo_row(telegram_user_id: int, label: str) -> dict | None:
+    """Exact-then-fuzzy lookup of a photo_vault row."""
     try:
         with get_db() as conn:
             row = conn.execute(
-                "SELECT file_path FROM photo_vault WHERE telegram_user_id = ? AND lower(label) = lower(?)",
+                "SELECT file_path, file_id FROM photo_vault WHERE telegram_user_id = ? AND lower(label) = lower(?)",
                 (telegram_user_id, label.strip()),
             ).fetchone()
             if not row:
                 row = conn.execute(
-                    "SELECT file_path FROM photo_vault WHERE telegram_user_id = ? AND lower(label) LIKE lower(?)",
+                    "SELECT file_path, file_id FROM photo_vault WHERE telegram_user_id = ? AND lower(label) LIKE lower(?)",
                     (telegram_user_id, f"%{label.strip()}%"),
                 ).fetchone()
-            if row:
-                path = row["file_path"]
-                return path if os.path.exists(path) else None
+            return dict(row) if row else None
     except Exception as exc:
-        logger.error("get_photo error: %s", exc)
+        logger.error("_find_photo_row error: %s", exc)
+        return None
+
+
+def get_photo_file_id(telegram_user_id: int, label: str) -> str | None:
+    """Return the Telegram file_id for a saved photo (cloud-side backup), or None."""
+    row = _find_photo_row(telegram_user_id, label)
+    if row and row.get("file_id"):
+        return row["file_id"]
     return None
 
 

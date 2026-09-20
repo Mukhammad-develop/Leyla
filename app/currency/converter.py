@@ -30,24 +30,7 @@ def convert_currency(from_cur: str, to_cur: str, amount: float) -> str:
     from_iso = resolve_currency(from_cur)
     to_iso = resolve_currency(to_cur)
 
-    try:
-        resp = requests.get(
-            "https://api.exchangerate.host/convert",
-            params={"from": from_iso, "to": to_iso, "amount": amount},
-            timeout=8,
-        )
-        data = resp.json()
-        if data.get("success") and data.get("result") is not None:
-            result = data["result"]
-            rate = data.get("info", {}).get("rate", result / amount if amount else 0)
-            return (
-                f"💱 **{amount:,.2f} {from_iso}** = **{result:,.2f} {to_iso}**\n"
-                f"📊 Rate: 1 {from_iso} = {rate:,.4f} {to_iso}\n"
-                f"_(Live rate)_"
-            )
-    except Exception as exc:
-        logger.warning("exchangerate.host failed: %s", exc)
-
+    # Primary: open.er-api.com — free, no API key required
     try:
         resp = requests.get(
             f"https://open.er-api.com/v6/latest/{from_iso}",
@@ -66,5 +49,24 @@ def convert_currency(from_cur: str, to_cur: str, amount: float) -> str:
                 )
     except Exception as exc:
         logger.warning("open.er-api.com failed: %s", exc)
+
+    # Fallback: exchangerate.host (requires account key nowadays, may fail)
+    try:
+        resp = requests.get(
+            "https://api.exchangerate.host/convert",
+            params={"from": from_iso, "to": to_iso, "amount": amount},
+            timeout=8,
+        )
+        data = resp.json()
+        if data.get("success") and data.get("result") is not None:
+            result = data["result"]
+            rate = data.get("info", {}).get("rate", result / amount if amount else 0)
+            return (
+                f"💱 **{amount:,.2f} {from_iso}** = **{result:,.2f} {to_iso}**\n"
+                f"📊 Rate: 1 {from_iso} = {rate:,.4f} {to_iso}\n"
+                f"_(Live rate)_"
+            )
+    except Exception as exc:
+        logger.warning("exchangerate.host failed: %s", exc)
 
     return f"❌ Could not fetch live exchange rate for {from_iso} → {to_iso}. Please try again later."
