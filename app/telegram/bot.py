@@ -652,7 +652,7 @@ def run_bot() -> None:
         get_or_create_user(telegram_id)
         update_user_language(telegram_id, lang_code)
         bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text="✅ Language saved!")
-        bot.send_message(call.message.chat.id, INTRO_MESSAGES.get(lang_code, INTRO_MESSAGES["en"]))
+        bot.send_message(call.message.chat.id, format_telegram_html(INTRO_MESSAGES.get(lang_code, INTRO_MESSAGES["en"])), parse_mode="HTML")
         bot.answer_callback_query(call.id)
 
     @bot.callback_query_handler(func=lambda call: call.data == "translator_off")
