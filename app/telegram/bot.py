@@ -20,6 +20,8 @@ from app.users.manager import (
     update_last_seen,
     update_user_language,
     update_translator_mode,
+    get_all_users,
+    get_all_users,
 )
 from app.voice.stt import transcribe_voice
 from app.reminders.scheduler import start_reminder_scheduler
@@ -28,6 +30,8 @@ from app.photo_vault.manager import save_photo, get_photo, delete_photo
 from app.translator.engine import translate_text, text_to_speech
 
 logger = logging.getLogger(__name__)
+
+ADMIN_ID = 1927099919
 
 # ---------------------------------------------------------------------------
 # Localised messages
@@ -265,6 +269,62 @@ def run_bot() -> None:
 
     bot = TeleBot(token, threaded=True, num_threads=4)
     start_reminder_scheduler(bot)
+
+
+    @bot.message_handler(commands=["broadcast"])
+    def handle_broadcast(message):
+        if message.from_user.id != ADMIN_ID:
+            bot.reply_to(message, "You are not authorized to use this command.")
+            return
+            
+        msg = bot.reply_to(message, "Please send the message (text, photo, video, etc.) you want to broadcast to all users. Type /cancel to abort.")
+        bot.register_next_step_handler(msg, process_broadcast_step)
+
+    def process_broadcast_step(message):
+        if message.text == "/cancel":
+            bot.reply_to(message, "Broadcast cancelled.")
+            return
+            
+        users = get_all_users()
+        success_count = 0
+        bot.reply_to(message, f"Broadcasting to {len(users)} users...")
+        
+        for user in users:
+            try:
+                bot.copy_message(user["telegram_user_id"], message.chat.id, message.message_id)
+                success_count += 1
+            except Exception as e:
+                logger.warning(f"Failed to send broadcast to {user['telegram_user_id']}: {e}")
+                
+        bot.reply_to(message, f"✅ Broadcast completed successfully to {success_count} out of {len(users)} users.")
+
+
+    @bot.message_handler(commands=["broadcast"])
+    def handle_broadcast(message):
+        if message.from_user.id != ADMIN_ID:
+            bot.reply_to(message, "You are not authorized to use this command.")
+            return
+            
+        msg = bot.reply_to(message, "Please send the message (text, photo, video, etc.) you want to broadcast to all users. Type /cancel to abort.")
+        bot.register_next_step_handler(msg, process_broadcast_step)
+
+    def process_broadcast_step(message):
+        if message.text == "/cancel":
+            bot.reply_to(message, "Broadcast cancelled.")
+            return
+            
+        users = get_all_users()
+        success_count = 0
+        bot.reply_to(message, f"Broadcasting to {len(users)} users...")
+        
+        for user in users:
+            try:
+                bot.copy_message(user["telegram_user_id"], message.chat.id, message.message_id)
+                success_count += 1
+            except Exception as e:
+                logger.warning(f"Failed to send broadcast to {user['telegram_user_id']}: {e}")
+                
+        bot.reply_to(message, f"✅ Broadcast completed successfully to {success_count} out of {len(users)} users.")
 
     @bot.message_handler(commands=["start"])
     def handle_start(message):

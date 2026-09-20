@@ -81,3 +81,10 @@ def update_translator_mode(telegram_id: int, target_lang: str) -> None:
             (target_lang.strip(), telegram_id),
         )
         conn.commit()
+
+
+def get_all_users() -> list[dict]:
+    """Return all registered users from the database."""
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM users").fetchall()
+        return [dict(r) for r in rows]
