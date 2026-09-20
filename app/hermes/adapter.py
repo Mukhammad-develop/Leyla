@@ -145,7 +145,7 @@ class HermesAdapter:
     # ---- System prompt ----------------------------------------------------
 
     def _get_system_prompt(self, current_lang: str) -> str:
-        name = {"ru": "Лейла", "en": "Leyla", "uz": "Laylo"}.get(current_lang, "Leyla")
+        name = {"ru": "Лейла", "en": "Laila", "uz": "Laylo"}.get(current_lang, "Laila")
 
         now_utc = datetime.now(timezone.utc)
 

@@ -55,7 +55,7 @@ INTRO_MESSAGES = {
         "«Что ты умеешь?» или «Сколько дней до Нового года?» 😊"
     ),
     "en": (
-        "👋 Hello! My name is Leyla.\n"
+        "👋 Hello! My name is Laila.\n"
         "I'm your personal assistant, and I'm always here to help.\n\n"
 
         "Here's what I can do — just type or send a voice message:\n\n"
