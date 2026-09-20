@@ -16,6 +16,11 @@ from zoneinfo import ZoneInfo
 
 from app.reminders.manager import add_reminder, get_pending_reminders, cancel_reminder
 from app.users.manager import get_user, update_user_timezone
+from app.contacts.manager import save_contact, get_all_contacts
+from app.search.web import web_search, format_search_results
+from app.currency.converter import convert_currency
+from app.prayer.times import get_prayer_times
+from app.photo_vault.manager import list_photos
 
 logger = logging.getLogger(__name__)
 
@@ -224,6 +229,50 @@ class HermesAdapter:
             "     - User: 'Remind me in 1 hour to check the oven' -> Append `[REMINDER: 3600 | Check the oven]`\n"
             "  3. Warmly and clearly confirm to the user that the timer/reminder has been set, stating how long or what time it will alert them.\n"
             "• To cancel a pending reminder if requested, append `[CANCEL_REMINDER: <id>]`.\n\n"
+            "📞 CONTACTS BOOK (NATIVE CAPABILITY):\n"
+            "• You can save and retrieve phone numbers for the user!\n"
+            "• When user says to save a contact (e.g. 'Save my doctor's number: Aliyev, +998901234567'), append `[SAVE_CONTACT: <name> | <number>]`.\n"
+            "• When user asks for a contact, check the 'User Contacts' section below and read the number from there.\n"
+            "• Never tell the user you can't store contacts. You CAN!\n\n"
+            "💱 LIVE CURRENCY CONVERSION (NATIVE CAPABILITY):\n"
+            "• You can fetch REAL-TIME exchange rates!\n"
+            "• When the user asks to convert currency (e.g. '100 dollar necha sum?', 'сколько рублей в 50 евро?', 'how much is 200 USD in UZS?'), "
+            "append the tag `[CURRENCY: <FROM> | <TO> | <AMOUNT>]` to your response.\n"
+            "• Examples:\n"
+            "  - '100 dollar necha so'm?' -> Append `[CURRENCY: USD | UZS | 100]`\n"
+            "  - 'Сколько рублей в 50 евро?' -> Append `[CURRENCY: EUR | RUB | 50]`\n"
+            "  - 'Convert 200 GBP to USD' -> Append `[CURRENCY: GBP | USD | 200]`\n"
+            "• The system will fetch the live rate and include it in the next context. Tell the user you are fetching live rates.\n\n"
+            "🕌 PRAYER TIMES (NATIVE CAPABILITY):\n"
+            "• You can fetch today's real prayer times for any city!\n"
+            "• When the user asks for prayer times (e.g. 'Toshkentda namoz vaqtlari', 'время намаза в Москве', 'prayer times in Dubai'), "
+            "append the tag `[PRAYER_TIMES: <city>]` to your response.\n"
+            "• Examples:\n"
+            "  - 'Toshkentda namoz vaqtlari?' -> Append `[PRAYER_TIMES: Tashkent]`\n"
+            "  - 'Время намаза в Москве' -> Append `[PRAYER_TIMES: Moscow]`\n"
+            "  - 'Prayer times in Dubai' -> Append `[PRAYER_TIMES: Dubai]`\n\n"
+            "🔎 LIVE WEB SEARCH (NATIVE CAPABILITY):\n"
+            "• You can search the internet for current information!\n"
+            "• Use web search for: current news, recent events, latest research, live sports scores, today's weather, "
+            "anything that might have changed recently, or when the user explicitly asks you to 'search', 'find', or 'look up'.\n"
+            "• When you need to search, append `[WEB_SEARCH: <search query in English>]` to your response.\n"
+            "• Examples:\n"
+            "  - 'What are the latest news today?' -> Append `[WEB_SEARCH: today latest news]`\n"
+            "  - 'Yangi yangiliklar qanday?' -> Append `[WEB_SEARCH: latest world news today]`\n"
+            "  - 'Буратино рецепти' -> Append `[WEB_SEARCH: Buratino recipe]`\n"
+            "• The search results will be injected into the conversation automatically. Summarize them for the user in their language.\n\n"
+            "📸 PHOTO VAULT (NATIVE CAPABILITY):\n"
+            "• Users can send you photos to save by label, and retrieve them later.\n"
+            "• When the user says 'show me my [label]' or 'send my [label] photo' etc., append `[GET_PHOTO: <label>]`.\n"
+            "• When the user wants to delete a saved photo, append `[DELETE_PHOTO: <label>]`.\n"
+            "• The 'User Photo Vault' section below lists all saved photos.\n\n"
+            "🌐 TRANSLATOR MODE:\n"
+            "• If user asks to turn on translator mode (e.g. 'turn on translator to Chinese', 'переводчик на китайский', 'tarjimon rejimini yoq'):\n"
+            "  1. Detect the target language from their message.\n"
+            "  2. If no language mentioned, ask what language to translate to.\n"
+            "  3. Append `[SET_TRANSLATOR: <lang_code>]` where lang_code is the normalized code (e.g. zh, en, ru, de, fr, ar, ko, ja, tr, uz).\n"
+            "  4. Warmly confirm that translator mode is now ON.\n"
+            "• If user asks to turn off translator (e.g. 'turn off translator', 'выключи переводчик'), append `[SET_TRANSLATOR: off]`.\n\n"
             "LANGUAGE SWITCHING RULES:\n"
             "• If the user EXPLICITLY asks to change the conversation language "
             "(e.g. 'Speak English', 'Давай по-русски', 'Endi o\\'zbekcha gaplashamiz'), "
@@ -251,7 +300,26 @@ class HermesAdapter:
         except Exception as e:
             logger.debug("Could not load pending reminders for prompt: %s", e)
 
+        # Inject contacts context
+        try:
+            contacts = get_all_contacts(self.telegram_user_id)
+            if contacts:
+                c_lines = [f"- {c['name']}: {c['phone_number']}" for c in contacts]
+                prompt += "\nUser Contacts:\n" + "\n".join(c_lines) + "\n"
+        except Exception as e:
+            logger.debug("Could not load contacts for prompt: %s", e)
+
+        # Inject photo vault context
+        try:
+            photos = list_photos(self.telegram_user_id)
+            if photos:
+                p_lines = [f"- {p['label']} ({p['file_type']})" for p in photos]
+                prompt += "\nUser Photo Vault (saved photos/documents):\n" + "\n".join(p_lines) + "\n"
+        except Exception as e:
+            logger.debug("Could not load photo vault for prompt: %s", e)
+
         return prompt
+
 
     # ---- Public entry point -----------------------------------------------
 
@@ -305,11 +373,71 @@ class HermesAdapter:
                     logger.error("Failed to cancel reminder: %s", exc)
             response = re.sub(r"\[CANCEL_REMINDER:\s*\d+\]", "", response).strip()
 
+            # Process [SAVE_CONTACT: <name> | <number>] tags
+            contact_matches = re.findall(r"\[SAVE_CONTACT:\s*(.+?)\s*\|\s*(.+?)\]", response)
+            for c_name, c_phone in contact_matches:
+                try:
+                    save_contact(self.telegram_user_id, c_name.strip(), c_phone.strip())
+                    logger.info("Saved contact '%s' for user %d", c_name, self.telegram_user_id)
+                except Exception as exc:
+                    logger.error("Failed to save contact: %s", exc)
+            response = re.sub(r"\[SAVE_CONTACT:\s*.+?\]", "", response).strip()
+
+            # Process [CURRENCY: <FROM> | <TO> | <AMOUNT>] tags — inject live rate
+            currency_matches = re.findall(r"\[CURRENCY:\s*([A-Za-z]+)\s*\|\s*([A-Za-z]+)\s*\|\s*([\d.,]+)\]", response)
+            response = re.sub(r"\[CURRENCY:\s*.+?\]", "", response).strip()
+            for from_c, to_c, amount_s in currency_matches:
+                try:
+                    amount = float(amount_s.replace(",", ""))
+                    rate_result = convert_currency(from_c.strip(), to_c.strip(), amount)
+                    response = response + "\n\n" + rate_result
+                except Exception as exc:
+                    logger.error("Currency conversion failed: %s", exc)
+
+            # Process [PRAYER_TIMES: <city>] tags
+            prayer_matches = re.findall(r"\[PRAYER_TIMES:\s*(.+?)\]", response)
+            response = re.sub(r"\[PRAYER_TIMES:\s*.+?\]", "", response).strip()
+            for city in prayer_matches:
+                try:
+                    prayer_result = get_prayer_times(city.strip(), lang=current_lang)
+                    response = response + "\n\n" + prayer_result
+                except Exception as exc:
+                    logger.error("Prayer times fetch failed: %s", exc)
+
+            # Process [WEB_SEARCH: <query>] tags
+            search_matches = re.findall(r"\[WEB_SEARCH:\s*(.+?)\]", response)
+            response = re.sub(r"\[WEB_SEARCH:\s*.+?\]", "", response).strip()
+            for query in search_matches:
+                try:
+                    results = web_search(query.strip())
+                    search_text = format_search_results(results, lang=current_lang)
+                    response = response + "\n\n" + search_text
+                except Exception as exc:
+                    logger.error("Web search failed: %s", exc)
+
+            # Process [SET_TRANSLATOR: <lang>] tags — store on the adapter for bot.py to pick up
+            translator_matches = re.findall(r"\[SET_TRANSLATOR:\s*(.+?)\]", response)
+            self._pending_translator_update = None
+            if translator_matches:
+                val = translator_matches[-1].strip()
+                self._pending_translator_update = val  # 'off' or a lang code
+            response = re.sub(r"\[SET_TRANSLATOR:\s*.+?\]", "", response).strip()
+
+            # Process [GET_PHOTO: <label>] and [DELETE_PHOTO: <label>] — store for bot.py
+            get_photo_matches = re.findall(r"\[GET_PHOTO:\s*(.+?)\]", response)
+            self._pending_get_photo = get_photo_matches[-1].strip() if get_photo_matches else None
+            response = re.sub(r"\[GET_PHOTO:\s*.+?\]", "", response).strip()
+
+            delete_photo_matches = re.findall(r"\[DELETE_PHOTO:\s*(.+?)\]", response)
+            self._pending_delete_photo = delete_photo_matches[-1].strip() if delete_photo_matches else None
+            response = re.sub(r"\[DELETE_PHOTO:\s*.+?\]", "", response).strip()
+
             history.append({"role": "user", "content": message})
             history.append({"role": "assistant", "content": response})
             self._write_json(self.history_file, history[-MAX_HISTORY_TURNS:])
             self._write_json(self.memory_file, memory)
             return response
+
 
     # ---- OpenAI call ------------------------------------------------------
 

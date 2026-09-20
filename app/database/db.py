@@ -61,7 +61,32 @@ def init_db() -> None:
                 CREATE INDEX IF NOT EXISTS idx_reminders_pending 
                 ON reminders (status, remind_at)
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS contacts (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    telegram_user_id INTEGER NOT NULL,
+                    name             TEXT NOT NULL,
+                    phone_number     TEXT NOT NULL,
+                    created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS photo_vault (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    telegram_user_id INTEGER NOT NULL,
+                    label            TEXT NOT NULL,
+                    file_path        TEXT NOT NULL,
+                    file_type        TEXT NOT NULL DEFAULT 'photo',
+                    created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+            # Migration: add translator columns if they don't exist
+            cursor = conn.execute("PRAGMA table_info(users)")
+            cols = [row[1] for row in cursor.fetchall()]
+            if "translator_lang" not in cols:
+                conn.execute("ALTER TABLE users ADD COLUMN translator_lang TEXT NOT NULL DEFAULT ''")
             conn.commit()
+
 
 
 @contextmanager

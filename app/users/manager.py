@@ -67,3 +67,17 @@ def get_user(telegram_id: int) -> dict | None:
             (telegram_id,),
         ).fetchone()
         return dict(row) if row else None
+
+
+def update_translator_mode(telegram_id: int, target_lang: str) -> None:
+    """
+    Enable or disable translator mode.
+    Pass a non-empty language code (e.g. 'zh', 'en') to enable,
+    or an empty string '' to disable.
+    """
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE users SET translator_lang = ? WHERE telegram_user_id = ?",
+            (target_lang.strip(), telegram_id),
+        )
+        conn.commit()
