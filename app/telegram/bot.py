@@ -277,26 +277,61 @@ def run_bot() -> None:
             bot.reply_to(message, "You are not authorized to use this command.")
             return
             
-        msg = bot.reply_to(message, "Please send the message (text, photo, video, etc.) you want to broadcast to all users. Type /cancel to abort.")
-        bot.register_next_step_handler(msg, process_broadcast_step)
+        msg = bot.reply_to(message, "Send Uzbek text. (Type /cancel to abort)")
+        bot.register_next_step_handler(msg, process_broadcast_uzbek)
 
-    def process_broadcast_step(message):
+    def process_broadcast_uzbek(message):
         if message.text == "/cancel":
             bot.reply_to(message, "Broadcast cancelled.")
             return
             
+        uzbek_msg = message
+        msg = bot.reply_to(message, "Now send Russian text.")
+        bot.register_next_step_handler(msg, process_broadcast_russian, uzbek_msg)
+
+    def process_broadcast_russian(message, uzbek_msg):
+        if message.text == "/cancel":
+            bot.reply_to(message, "Broadcast cancelled.")
+            return
+            
+        russian_msg = message
+        msg = bot.reply_to(message, "Now send English text.")
+        bot.register_next_step_handler(msg, process_broadcast_english, uzbek_msg, russian_msg)
+
+    def process_broadcast_english(message, uzbek_msg, russian_msg):
+        if message.text == "/cancel":
+            bot.reply_to(message, "Broadcast cancelled.")
+            return
+            
+        english_msg = message
+        bot.reply_to(message, "Broadcasting messages...")
+        
         users = get_all_users()
-        success_count = 0
-        bot.reply_to(message, f"Broadcasting to {len(users)} users...")
+        success = {"uz": 0, "ru": 0, "en": 0}
         
         for user in users:
-            try:
-                bot.copy_message(user["telegram_user_id"], message.chat.id, message.message_id)
-                success_count += 1
-            except Exception as e:
-                logger.warning(f"Failed to send broadcast to {user['telegram_user_id']}: {e}")
+            lang = user.get("language")
+            if not lang:
+                lang = "en"
                 
-        bot.reply_to(message, f"✅ Broadcast completed successfully to {success_count} out of {len(users)} users.")
+            msg_to_send = None
+            if lang == "uz":
+                msg_to_send = uzbek_msg
+            elif lang == "ru":
+                msg_to_send = russian_msg
+            else:
+                msg_to_send = english_msg
+                
+            try:
+                bot.copy_message(user["telegram_user_id"], msg_to_send.chat.id, msg_to_send.message_id)
+                success[lang] += 1
+            except Exception as e:
+                logger.warning(f"Broadcast failed for {user['telegram_user_id']}: {e}")
+                
+        bot.reply_to(message, f"✅ Broadcast completed!
+Uzbek: {success['uz']}
+Russian: {success['ru']}
+English: {success['en']}")
 
 
     @bot.message_handler(commands=["broadcast"])
@@ -305,26 +340,61 @@ def run_bot() -> None:
             bot.reply_to(message, "You are not authorized to use this command.")
             return
             
-        msg = bot.reply_to(message, "Please send the message (text, photo, video, etc.) you want to broadcast to all users. Type /cancel to abort.")
-        bot.register_next_step_handler(msg, process_broadcast_step)
+        msg = bot.reply_to(message, "Send Uzbek text. (Type /cancel to abort)")
+        bot.register_next_step_handler(msg, process_broadcast_uzbek)
 
-    def process_broadcast_step(message):
+    def process_broadcast_uzbek(message):
         if message.text == "/cancel":
             bot.reply_to(message, "Broadcast cancelled.")
             return
             
+        uzbek_msg = message
+        msg = bot.reply_to(message, "Now send Russian text.")
+        bot.register_next_step_handler(msg, process_broadcast_russian, uzbek_msg)
+
+    def process_broadcast_russian(message, uzbek_msg):
+        if message.text == "/cancel":
+            bot.reply_to(message, "Broadcast cancelled.")
+            return
+            
+        russian_msg = message
+        msg = bot.reply_to(message, "Now send English text.")
+        bot.register_next_step_handler(msg, process_broadcast_english, uzbek_msg, russian_msg)
+
+    def process_broadcast_english(message, uzbek_msg, russian_msg):
+        if message.text == "/cancel":
+            bot.reply_to(message, "Broadcast cancelled.")
+            return
+            
+        english_msg = message
+        bot.reply_to(message, "Broadcasting messages...")
+        
         users = get_all_users()
-        success_count = 0
-        bot.reply_to(message, f"Broadcasting to {len(users)} users...")
+        success = {"uz": 0, "ru": 0, "en": 0}
         
         for user in users:
-            try:
-                bot.copy_message(user["telegram_user_id"], message.chat.id, message.message_id)
-                success_count += 1
-            except Exception as e:
-                logger.warning(f"Failed to send broadcast to {user['telegram_user_id']}: {e}")
+            lang = user.get("language")
+            if not lang:
+                lang = "en"
                 
-        bot.reply_to(message, f"✅ Broadcast completed successfully to {success_count} out of {len(users)} users.")
+            msg_to_send = None
+            if lang == "uz":
+                msg_to_send = uzbek_msg
+            elif lang == "ru":
+                msg_to_send = russian_msg
+            else:
+                msg_to_send = english_msg
+                
+            try:
+                bot.copy_message(user["telegram_user_id"], msg_to_send.chat.id, msg_to_send.message_id)
+                success[lang] += 1
+            except Exception as e:
+                logger.warning(f"Broadcast failed for {user['telegram_user_id']}: {e}")
+                
+        bot.reply_to(message, f"✅ Broadcast completed!
+Uzbek: {success['uz']}
+Russian: {success['ru']}
+English: {success['en']}")
 
     @bot.message_handler(commands=["start"])
     def handle_start(message):
