@@ -34,43 +34,79 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 INTRO_MESSAGES = {
     "ru": (
-        "👋 Привет! Меня зовут Лейла.\n"
-        "Я — ваш личный помощник.\n\n"
-        "Вот что я умею:\n"
-        "🧮 Считать деньги и расходы\n"
-        "📝 Писать поздравления и письма\n"
-        "📋 Напоминать о важных делах\n"
-        "🧠 Запоминать номера врачей и адреса\n"
-        "🌐 Переводить текст или голос (включите режим переводчика)\n"
-        "📸 Хранить фото документов (просто отправьте фото)\n"
-        "🔎 Искать информацию в интернете\n\n"
-        "🎤 Вы можете просто записать голосовое сообщение — я пойму!"
+        "👋 Привет! Меня зовут Лейла, ваш личный помощник.
+
+"
+        "Вот что я умею (пишите или отправляйте голосовые!):
+"
+        "💱 **Курсы валют**: «Сколько будет 100 долларов в сумах?»
+"
+        "⏰ **Напоминания**: «Напомни выпить лекарство через 2 часа»
+"
+        "🌐 **Переводчик**: «Включи переводчик на китайский» (переводит голос и текст)
+"
+        "📸 **Чтение фото**: Отправьте фото документа и спросите «Что здесь написано?»
+"
+        "🗂 **Хранилище**: Отправьте фото и скажите «Сохрани как мой паспорт»
+"
+        "📞 **Контакты**: «Запомни номер врача: Алиев +99890...»
+"
+        "🕌 **Время намаза**: «Время намаза в Ташкенте»
+"
+        "🔎 **Поиск в сети**: «Какая сегодня погода?»
+
+"
+        "🎤 Вам не нужно учить команды — просто общайтесь со мной как с человеком!"
     ),
     "en": (
-        "👋 Hello! My name is Laila.\n"
-        "I'm your personal assistant.\n\n"
-        "Here's what I can do:\n"
-        "🧮 Calculate money and expenses\n"
-        "📝 Write greetings and letters\n"
-        "📋 Remind you of important tasks\n"
-        "🧠 Remember doctor numbers and addresses\n"
-        "🌐 Translate text or voice (turn on translator mode)\n"
-        "📸 Store photos of documents (just send a photo)\n"
-        "🔎 Search the internet for you\n\n"
-        "🎤 You can also just record a voice message — I'll understand!"
+        "👋 Hello! My name is Laila, your personal assistant.
+
+"
+        "Here is what I can do (just type or speak!):
+"
+        "💱 **Live Currency**: \"How much is 100 USD in UZS?\"
+"
+        "⏰ **Reminders**: \"Remind me to take my pills in 2 hours\"
+"
+        "🌐 **Translator**: \"Turn on translator to Chinese\" (translates voice & text)
+"
+        "📸 **Read Photos**: Send a photo of a document and ask \"What does this say?\"
+"
+        "🗂 **Photo Vault**: Send an image and say \"Save this as my passport\"
+"
+        "📞 **Contacts**: \"Save my doctor's number: Aliyev +99890...\"
+"
+        "🕌 **Prayer Times**: \"Prayer times in Tashkent\"
+"
+        "🔎 **Web Search**: \"What is the weather today?\"
+
+"
+        "🎤 You don't need to learn commands — just talk to me naturally!"
     ),
     "uz": (
-        "👋 Salom! Mening ismim Laylo.\n"
-        "Men sizning shaxsiy yordamchingizman.\n\n"
-        "Mana men nimalar qila olaman:\n"
-        "🧮 Pul va xarajatlarni hisoblash\n"
-        "📝 Tabriklar va xatlar yozish\n"
-        "📋 Muhim ishlarni eslatish\n"
-        "🧠 Shifokor raqamlari va manzillarni eslab qolish\n"
-        "🌐 Matn yoki ovozni tarjima qilish (tarjimon rejimini yoqing)\n"
-        "📸 Hujjatlar rasmlarini saqlash (shunchaki rasm yuboring)\n"
-        "🔎 Siz uchun internetdan qidirish\n\n"
-        "🎤 Ovozli xabar ham yuborishingiz mumkin — men tushunaman!"
+        "👋 Salom! Mening ismim Laylo, sizning shaxsiy yordamchingizman.
+
+"
+        "Men nimalar qila olaman (yozing yoki ovozli xabar yuboring!):
+"
+        "💱 **Valyuta kursi**: «100 dollar necha so'm bo'ladi?»
+"
+        "⏰ **Eslatmalar**: «2 soatdan keyin dori ichishni eslat»
+"
+        "🌐 **Tarjimon**: «Xitoy tiliga tarjimonni yoq» (ovoz va matnni tarjima qiladi)
+"
+        "📸 **Rasm o'qish**: Hujjat rasmini yuboring va «Bu yerda nima yozilgan?» deb so'rang
+"
+        "🗂 **Rasmlar xazinasi**: Rasm yuboring va «Buni pasportim deb saqla» deng
+"
+        "📞 **Kontaktlar**: «Shifokor raqamini saqla: Aliyev +99890...»
+"
+        "🕌 **Namoz vaqtlari**: «Toshkentda namoz vaqtlari»
+"
+        "🔎 **Internet qidiruv**: «Bugun ob-havo qanday?»
+
+"
+        "🎤 Hech qanday buyruqlarni yodlash shart emas — men bilan oddiy gaplashing!"
     ),
 }
 
