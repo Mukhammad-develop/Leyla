@@ -303,6 +303,7 @@ class TestAdapterTagProcessing(unittest.TestCase):
         adapter = self._make_user(760000)
         prompt = adapter._get_system_prompt("en")
         self.assertIn("ONE specific next step", prompt)
+        self.assertIn("Do NOT end with generic filler", prompt)
 
     def test_shopping_list_survives_history_truncation(self):
         adapter = self._make_user(760001)
