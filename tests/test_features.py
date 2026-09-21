@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.database.db import init_db  # noqa: E402
 from app.hermes.adapter import HermesAdapter  # noqa: E402
+from app.telegram.formatting import format_telegram_html, strip_telegram_markdown  # noqa: E402
 from app.users.manager import (  # noqa: E402
     get_or_create_user,
     get_user,
@@ -235,6 +236,28 @@ class TestUserSettings(unittest.TestCase):
         user = get_user(750003)
         self.assertEqual(user["city"], "Tashkent")
         self.assertEqual(user["calorie_goal"], 2000)
+
+
+class TestTelegramFormatting(unittest.TestCase):
+    def test_bold_markdown_becomes_telegram_html(self):
+        self.assertEqual(format_telegram_html("**text**"), "<b>text</b>")
+        self.assertEqual(
+            format_telegram_html("🕌 **Prayer Times — Tashkent**\nFajr: **05:00**"),
+            "🕌 <b>Prayer Times — Tashkent</b>\nFajr: <b>05:00</b>",
+        )
+
+    def test_html_escapes_user_content(self):
+        self.assertEqual(
+            format_telegram_html("**total** < 5 & rising"),
+            "<b>total</b> &lt; 5 &amp; rising",
+        )
+
+    def test_plain_fallback_never_leaves_double_asterisks(self):
+        self.assertEqual(strip_telegram_markdown("**text** and `code`"), "text and code")
+        self.assertEqual(
+            strip_telegram_markdown("# Title\n**Section**\n[link](https://example.com)"),
+            "Title\nSection\nlink (https://example.com)",
+        )
 
 
 class TestAdapterTagProcessing(unittest.TestCase):

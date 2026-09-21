@@ -2,12 +2,13 @@
 Telegram bot — single long-running process serving all users.
 """
 
-import html
 import io
 import json
 import logging
 import os
 import re
+import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -16,6 +17,7 @@ import traceback
 from telebot import TeleBot
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from app.telegram.formatting import format_telegram_html, strip_telegram_markdown
 from app.hermes.adapter import HermesAdapter
 from app.users.manager import (
     get_or_create_user,
@@ -186,35 +188,35 @@ def split_message(text: str, max_chars: int = 3500) -> list[str]:
     return chunks
 
 
-def format_telegram_html(text: str) -> str:
-    code_blocks = []
-    def save_code_block(match):
-        code_blocks.append(match.group(1))
-        return f"\x00CB{len(code_blocks)-1}\x00"
-
-    text = re.sub(r"```(?:[a-zA-Z0-9_-]+)?\n?(.*?)```", save_code_block, text, flags=re.DOTALL)
-
-    inline_codes = []
-    def save_inline_code(match):
-        inline_codes.append(match.group(1))
-        return f"\x00IC{len(inline_codes)-1}\x00"
-
-    text = re.sub(r"`([^`]+)`", save_inline_code, text)
-
-    text = html.escape(text, quote=False)
-    text = re.sub(r"\[([^\]]+)\]\((https?://[^\s\)]+)\)", r'<a href="\2">\1</a>', text)
-    text = re.sub(r"^#{1,6}\s*(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
-    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text, flags=re.DOTALL)
-    text = re.sub(r"(?<!\w)\*([^*\n]+?)\*(?!\w)", r"<i>\1</i>", text)
-    text = re.sub(r"(?<!\w)_([^_\n]+?)_(?!\w)", r"<i>\1</i>", text)
-    text = re.sub(r"~~(.+?)~~", r"<s>\1</s>", text, flags=re.DOTALL)
-
-    for i, code in enumerate(inline_codes):
-        text = text.replace(f"\x00IC{i}\x00", f"<code>{html.escape(code, quote=False)}</code>")
-    for i, code in enumerate(code_blocks):
-        text = text.replace(f"\x00CB{i}\x00", f"<pre><code>{html.escape(code, quote=False)}</code></pre>")
-
-    return text
+def _to_ogg_opus(mp3_bytes: bytes) -> io.BytesIO | None:
+    """
+    Convert MP3 to OGG/Opus so Telegram renders a real voice-note bubble
+    (round player + waveform) instead of a generic audio file.
+    Returns None when ffmpeg is unavailable or conversion fails.
+    """
+    if not shutil.which("ffmpeg"):
+        return None
+    tmp_in = tmp_out = None
+    try:
+        fd, tmp_in = tempfile.mkstemp(suffix=".mp3")
+        with os.fdopen(fd, "wb") as f:
+            f.write(mp3_bytes)
+        fd, tmp_out = tempfile.mkstemp(suffix=".ogg")
+        os.close(fd)
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", tmp_in,
+             "-c:a", "libopus", "-b:a", "48k", tmp_out],
+            check=True, capture_output=True, timeout=60,
+        )
+        with open(tmp_out, "rb") as f:
+            return io.BytesIO(f.read())
+    except Exception as exc:
+        logger.warning("MP3→OGG conversion failed: %s", exc)
+        return None
+    finally:
+        for p in (tmp_in, tmp_out):
+            if p and os.path.exists(p):
+                os.unlink(p)
 
 
 def _send_text_chunks(bot, chat_id, text):
@@ -223,8 +225,9 @@ def _send_text_chunks(bot, chat_id, text):
         if chunk.strip():
             try:
                 bot.send_message(chat_id, format_telegram_html(chunk), parse_mode="HTML")
-            except Exception:
-                bot.send_message(chat_id, chunk)
+            except Exception as exc:
+                logger.warning("HTML send failed; falling back to plain text: %s", exc)
+                bot.send_message(chat_id, strip_telegram_markdown(chunk))
 
 
 def _deliver_response(bot, chat_id, user, response_text):
@@ -239,7 +242,7 @@ def _deliver_response(bot, chat_id, user, response_text):
         bot.send_chat_action(chat_id, "record_voice")
         audio_bytes = text_to_speech(response_text[:TTS_MAX_CHARS], lang)
         if audio_bytes:
-            bot.send_voice(chat_id, io.BytesIO(audio_bytes))
+            bot.send_voice(chat_id, _to_ogg_opus(audio_bytes) or io.BytesIO(audio_bytes))
         elif mode == "voice":
             # TTS unavailable — never leave the user with silence
             _send_text_chunks(bot, chat_id, response_text)
@@ -255,11 +258,11 @@ def _process_translator_mode(bot, chat_id, text, target_lang, lang_code):
     formatted = format_telegram_html(translated)
     bot.send_message(chat_id, formatted, parse_mode="HTML", reply_markup=markup)
 
-    # Also send TTS Voice note
+    # Also send TTS Voice note (OGG/Opus so it looks like a real voice message)
     bot.send_chat_action(chat_id, "record_voice")
     audio_bytes = text_to_speech(translated, target_lang)
     if audio_bytes:
-        bot.send_voice(chat_id, io.BytesIO(audio_bytes), reply_markup=markup)
+        bot.send_voice(chat_id, _to_ogg_opus(audio_bytes) or io.BytesIO(audio_bytes), reply_markup=markup)
 
 
 def _send_data_export(bot, chat_id, telegram_id, lang):

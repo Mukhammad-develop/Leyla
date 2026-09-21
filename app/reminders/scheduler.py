@@ -24,25 +24,26 @@ from app.reminders.manager import (
 from app.users.manager import get_all_users, update_briefing_last_sent
 from app.events.manager import get_events_on, mark_wished
 from app.hermes.adapter import parse_user_timezone
+from app.telegram.formatting import format_telegram_html, strip_telegram_markdown
 
 logger = logging.getLogger(__name__)
 
 REMINDER_ALERTS = {
-    "ru": "⏰ <b>Напоминание!</b>\n\n🔔 {text}",
-    "en": "⏰ <b>Reminder!</b>\n\n🔔 {text}",
-    "uz": "⏰ <b>Eslatma!</b>\n\n🔔 {text}",
+    "ru": "⏰ **Напоминание!**\n\n🔔 {text}",
+    "en": "⏰ **Reminder!**\n\n🔔 {text}",
+    "uz": "⏰ **Eslatma!**\n\n🔔 {text}",
 }
 
 BRIEFING_HEADERS = {
-    "ru": "🌅 <b>Доброе утро! Вот ваш день:</b>",
-    "en": "🌅 <b>Good morning! Here is your day:</b>",
-    "uz": "🌅 <b>Xayrli tong! Mana bugungi kun:</b>",
+    "ru": "🌅 **Доброе утро! Вот ваш день:**",
+    "en": "🌅 **Good morning! Here is your day:**",
+    "uz": "🌅 **Xayrli tong! Mana bugungi kun:**",
 }
 
 BRIEFING_REMINDER_HEADERS = {
-    "ru": "⏰ <b>Активные напоминания:</b>",
-    "en": "⏰ <b>Your pending reminders:</b>",
-    "uz": "⏰ <b>Faol eslatmalaringiz:</b>",
+    "ru": "⏰ **Активные напоминания:**",
+    "en": "⏰ **Your pending reminders:**",
+    "uz": "⏰ **Faol eslatmalaringiz:**",
 }
 
 BRIEFING_NO_REMINDERS = {
@@ -53,14 +54,14 @@ BRIEFING_NO_REMINDERS = {
 
 EVENT_GREETINGS = {
     "birthday": {
-        "ru": "🎂 <b>С днём рождения!</b> Сегодня день рождения: <b>{name}</b> 🎉",
-        "en": "🎂 <b>Happy Birthday!</b> Today is <b>{name}</b>'s birthday 🎉",
-        "uz": "🎂 <b>Tug'ilgan kun muborak!</b> Bugun <b>{name}</b>ning tug'ilgan kuni 🎉",
+        "ru": "🎂 **С днём рождения!** Сегодня день рождения: **{name}** 🎉",
+        "en": "🎂 **Happy Birthday!** Today is **{name}**'s birthday 🎉",
+        "uz": "🎂 **Tug'ilgan kun muborak!** Bugun **{name}**ning tug'ilgan kuni 🎉",
     },
     "event": {
-        "ru": "🗓️ Сегодня: <b>{name}</b>",
-        "en": "🗓️ Today: <b>{name}</b>",
-        "uz": "🗓️ Bugun: <b>{name}</b>",
+        "ru": "🗓️ Сегодня: **{name}**",
+        "en": "🗓️ Today: **{name}**",
+        "uz": "🗓️ Bugun: **{name}**",
     },
 }
 
@@ -68,6 +69,15 @@ EVENT_HOUR_MINUTE = "09:00"
 
 _scheduler_started = False
 _scheduler_lock = threading.Lock()
+
+
+def _send_html_message(bot, chat_id: int, text: str) -> None:
+    """Send scheduler markdown as Telegram HTML, never leaking raw ** markers."""
+    try:
+        bot.send_message(chat_id, format_telegram_html(text), parse_mode="HTML")
+    except Exception as exc:
+        logger.warning("HTML scheduler send failed; falling back to plain text: %s", exc)
+        bot.send_message(chat_id, strip_telegram_markdown(text))
 
 
 def _city_from_timezone(tz_str: str) -> str:
@@ -147,7 +157,7 @@ def start_reminder_scheduler(bot) -> None:
                     alert_message = template.format(text=text)
 
                     try:
-                        bot.send_message(chat_id, alert_message, parse_mode="HTML")
+                        _send_html_message(bot, chat_id, alert_message)
                         logger.info("Sent reminder %d to chat %d", item["id"], chat_id)
                     except Exception as exc:
                         logger.error("Failed to send reminder %d to %d: %s", item["id"], chat_id, exc)
@@ -187,7 +197,7 @@ def start_reminder_scheduler(bot) -> None:
                     ):
                         try:
                             briefing = _build_briefing(user)
-                            bot.send_message(user["telegram_user_id"], briefing, parse_mode="HTML")
+                            _send_html_message(bot, user["telegram_user_id"], briefing)
                             update_briefing_last_sent(telegram_id, today_str)
                             logger.info("Sent morning briefing to user %d", telegram_id)
                         except Exception as exc:
@@ -201,7 +211,7 @@ def start_reminder_scheduler(bot) -> None:
                             try:
                                 templates = EVENT_GREETINGS.get(ev["event_type"], EVENT_GREETINGS["event"])
                                 greeting = templates.get(lang, templates["en"]).format(name=ev["name"])
-                                bot.send_message(user["telegram_user_id"], greeting, parse_mode="HTML")
+                                _send_html_message(bot, user["telegram_user_id"], greeting)
                                 mark_wished(ev["id"], local_now.year)
                                 logger.info("Sent event greeting '%s' to user %d", ev["name"], telegram_id)
                             except Exception as exc:
