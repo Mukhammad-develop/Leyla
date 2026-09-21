@@ -401,6 +401,35 @@ class TestAdapterTagProcessing(unittest.TestCase):
         events = get_all_events(760013)
         self.assertTrue(any(e["name"] == "e2efallback" and e["event_date"] == "2030-01-01" for e in events))
 
+    def test_clock_reminder_uses_location_from_history(self):
+        adapter = self._make_user(760015)
+        adapter._write_json(adapter.history_file, [{"role": "user", "content": "I live in Berlin"}])
+        response = adapter.send_message("Remind me at 23:45 to drink water", "en")
+        self.assertIn("Reminder set for 23:45", response)
+        self.assertEqual(get_user(760015)["timezone"], "Europe/Berlin")
+        self.assertTrue(any("drink water" in r["text"] for r in get_pending_reminders(760015)))
+
+    def test_list_clear_without_tag_clears(self):
+        adapter = self._make_user(760016)
+        adapter.send_message("Add e2e x to my shopping list", "en")
+        self.assertEqual(get_all_lists(760016).get("shopping"), ["e2e x"])
+        adapter.send_message("Clear my shopping list", "en")
+        self.assertEqual(get_all_lists(760016), {})
+
+    def test_contact_save_and_list_without_tags(self):
+        adapter = self._make_user(760017)
+        adapter.send_message("Save contact E2EPharmacy +491555666777", "en")
+        response = adapter.send_message("List my contacts", "en")
+        self.assertIn("E2EPharmacy", response)
+        self.assertIn("+491555666777", response)
+
+    def test_cancel_reminder_without_tag_cancels(self):
+        adapter = self._make_user(760018)
+        adapter.send_message("Set a timer for 3600 seconds to e2e cancelme", "en")
+        self.assertTrue(any("cancelme" in r["text"] for r in get_pending_reminders(760018)))
+        adapter.send_message("Cancel my reminder to e2e cancelme", "en")
+        self.assertFalse(any("cancelme" in r["text"] for r in get_pending_reminders(760018)))
+
 
 def tearDownModule():
     shutil.rmtree(_temp_dir, ignore_errors=True)

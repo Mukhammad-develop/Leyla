@@ -497,6 +497,51 @@ class HermesAdapter:
             "pound": "GBP", "pounds": "GBP",
         }.get(t)
 
+    @staticmethod
+    def _city_timezones() -> dict:
+        return {
+            "berlin": "Europe/Berlin",
+            "tashkent": "Asia/Tashkent", "toshkent": "Asia/Tashkent",
+            "samarkand": "Asia/Samarkand", "samarqand": "Asia/Samarkand",
+            "moscow": "Europe/Moscow", "moskva": "Europe/Moscow",
+            "london": "Europe/London",
+            "paris": "Europe/Paris",
+            "madrid": "Europe/Madrid",
+            "rome": "Europe/Rome",
+            "istanbul": "Europe/Istanbul",
+            "dubai": "Asia/Dubai",
+            "new york": "America/New_York",
+            "los angeles": "America/Los_Angeles",
+            "chicago": "America/Chicago",
+            "toronto": "America/Toronto",
+            "almaty": "Asia/Almaty",
+            "bishkek": "Asia/Bishkek",
+            "seoul": "Asia/Seoul",
+            "tokyo": "Asia/Tokyo",
+            "beijing": "Asia/Shanghai",
+            "shanghai": "Asia/Shanghai",
+            "singapore": "Asia/Singapore",
+            "sydney": "Australia/Sydney",
+        }
+
+    @classmethod
+    def _location_request(cls, text: str):
+        low = text.lower()
+        if not re.search(r"\b(live in|am in|i'm in|im in|живу в|я в|men\s+\w+|man\s+\w+)\b", low):
+            return None
+        for city, tz in cls._city_timezones().items():
+            if city in low:
+                return city, tz
+        return None
+
+    @classmethod
+    def _clock_reminder_request(cls, text: str):
+        low = text.lower()
+        m = re.search(r"remind me at\s+(\d{1,2}:\d{2})\s+(?:to\s+)?(.+)", low)
+        if not m:
+            return None
+        return m.group(1), m.group(2).strip(" .")
+
     @classmethod
     def _currency_request(cls, text: str):
         low = text.lower()
@@ -678,16 +723,88 @@ class HermesAdapter:
             return m.group(1).strip(" .'\"")
         return None
 
+    @staticmethod
+    def _norm_list_name(value: str) -> str:
+        low = (value or "").strip().lower()
+        if "shopping" in low or "shop" in low or "покуп" in low or "xarid" in low:
+            return "shopping"
+        if "todo" in low or "to-do" in low or "to do" in low or "дел" in low:
+            return "todo"
+        return low or "shopping"
+
+    @classmethod
+    def _list_action_request(cls, text: str):
+        low = text.lower().strip()
+        m = re.search(r"(?:clear|empty|очисти|tozala)(?:\s+my)?\s+([a-zа-я'’ -]*?)\s+list", low)
+        if m:
+            return "clear", cls._norm_list_name(m.group(1)), []
+        m = re.search(r"add\s+(.+?)\s+to\s+(?:my\s+)?([a-zа-я'’ -]*?)\s+list", low)
+        if m:
+            items = [x.strip(" .") for x in re.split(r"\s+and\s+|,", m.group(1)) if x.strip(" .")]
+            return "add", cls._norm_list_name(m.group(2)), items
+        m = re.search(r"remove\s+(.+?)\s+from\s+(?:my\s+)?([a-zа-я'’ -]*?)\s+list", low)
+        if m:
+            items = [x.strip(" .") for x in re.split(r"\s+and\s+|,", m.group(1)) if x.strip(" .")]
+            return "remove", cls._norm_list_name(m.group(2)), items
+        return None
+
+    @staticmethod
+    def _contact_save_request(text: str):
+        low = text.lower().strip()
+        if "save" not in low and "remember" not in low:
+            return None
+        m = re.search(r"(\+?\d[\d\s().-]{5,}\d)", text)
+        if not m:
+            return None
+        phone = re.sub(r"[\s().-]+", "", m.group(1))
+        name_part = text[: m.start(1)]
+        name = re.sub(r"^(save|remember)\s+", "", name_part, flags=re.IGNORECASE)
+        name = re.sub(r"\b(my|contact|number|phone|dentist|doctor)\b", "", name, flags=re.IGNORECASE)
+        name = name.strip(" :.'\"") or name_part.strip(" :.'\"")
+        return (name, phone) if name and phone else None
+
+    @staticmethod
+    def _contact_read_request(text: str, contacts: list[dict]):
+        low = text.lower()
+        if ("list" in low or "show" in low or "all" in low) and "contact" in low:
+            return "list", None
+        for contact in contacts:
+            name = (contact.get("name") or "").lower()
+            if name and name in low and ("number" in low or "phone" in low or "contact" in low):
+                return "one", contact
+        return None
+
     def _apply_action_fallbacks(self, message: str, response: str, current_lang: str, handled: dict, history: list) -> str:
         """Run obvious native actions when the model promised them but forgot the tag."""
         notes = []
+
+        user = get_user(self.telegram_user_id) if self.telegram_user_id else None
+        if user and not (user.get("timezone", "") or "").strip():
+            recent_user_text = "\n".join(
+                (m.get("content") or "") for m in history[-10:] if m.get("role") == "user"
+            )
+            loc = self._location_request(message) or self._location_request(recent_user_text)
+            if loc:
+                city, tz_name = loc
+                try:
+                    update_user_timezone(self.telegram_user_id, tz_name)
+                    update_user_city(self.telegram_user_id, city.title())
+                    user = get_user(self.telegram_user_id) or user
+                    notes.append({
+                        "ru": f"📍 Сохранил местоположение: {city.title()} ({tz_name}).",
+                        "uz": f"📍 Joylashuv saqlandi: {city.title()} ({tz_name}).",
+                        "en": f"📍 Saved your location: {city.title()} ({tz_name}).",
+                    }.get(current_lang, f"📍 Saved your location: {city.title()} ({tz_name})."))
+                except Exception as exc:
+                    logger.error("Fallback location save failed: %s", exc)
 
         if not handled.get("currency"):
             req = self._currency_request(message)
             if req:
                 from_code, to_code, amount = req
                 try:
-                    response = (response + "\n\n" + convert_currency(from_code, to_code, amount)).strip()
+                    # Replace the model's guess with the live-rate answer.
+                    response = convert_currency(from_code, to_code, amount)
                 except Exception as exc:
                     logger.error("Fallback currency conversion failed: %s", exc)
                     notes.append({
@@ -701,7 +818,14 @@ class HermesAdapter:
             if query:
                 try:
                     results = web_search(query)
-                    response = (response + "\n\n" + format_search_results(results, lang=current_lang)).strip()
+                    if results:
+                        response = (response + "\n\n" + format_search_results(results, lang=current_lang)).strip()
+                    elif not response.strip() or re.search(r"hold on|one moment|just a moment|let me|checking|searching", response, re.IGNORECASE):
+                        notes.append({
+                            "ru": "🔎 Веб-поиск не дал полезных результатов.",
+                            "uz": "🔎 Internet qidiruvi foydali natija bermadi.",
+                            "en": "🔎 Web search didn't find useful results.",
+                        }.get(current_lang, "🔎 Web search didn't find useful results."))
                 except Exception as exc:
                     logger.error("Fallback web search failed: %s", exc)
                     notes.append({
@@ -735,6 +859,73 @@ class HermesAdapter:
                 except Exception as exc:
                     logger.error("Fallback voice mode failed: %s", exc)
 
+        if not handled.get("contact"):
+            save_req = self._contact_save_request(message)
+            if save_req:
+                name, phone = save_req
+                try:
+                    save_contact(self.telegram_user_id, name, phone)
+                    notes.append({
+                        "ru": f"📞 Контакт сохранён: {name} — {phone}.",
+                        "uz": f"📞 Kontakt saqlandi: {name} — {phone}.",
+                        "en": f"📞 Contact saved: {name} — {phone}.",
+                    }.get(current_lang, f"📞 Contact saved: {name} — {phone}."))
+                except Exception as exc:
+                    logger.error("Fallback contact save failed: %s", exc)
+            else:
+                contacts = get_all_contacts(self.telegram_user_id)
+                read_req = self._contact_read_request(message, contacts)
+                if read_req:
+                    kind, contact = read_req
+                    if kind == "list":
+                        if contacts:
+                            lines = [f"- {c['name']}: {c['phone_number']}" for c in contacts]
+                            header = {
+                                "ru": "📞 Ваши контакты:",
+                                "uz": "📞 Kontaktlaringiz:",
+                                "en": "📞 Your contacts:",
+                            }.get(current_lang, "📞 Your contacts:")
+                            response = header + "\n" + "\n".join(lines)
+                        else:
+                            response = {
+                                "ru": "📞 У вас пока нет сохранённых контактов.",
+                                "uz": "📞 Hozircha saqlangan kontaktlaringiz yo'q.",
+                                "en": "📞 You don't have any saved contacts yet.",
+                            }.get(current_lang, "📞 You don't have any saved contacts yet.")
+                    elif contact:
+                        response = f"{contact['name']}: {contact['phone_number']}"
+
+        if not (handled.get("list_add") or handled.get("list_remove") or handled.get("list_clear")):
+            list_action = self._list_action_request(message)
+            if list_action:
+                action, list_name, items = list_action
+                try:
+                    if action == "clear":
+                        clear_list(self.telegram_user_id, list_name)
+                        notes.append({
+                            "ru": f"🗑️ Список '{list_name}' очищен.",
+                            "uz": f"🗑️ '{list_name}' ro'yxati tozalandi.",
+                            "en": f"🗑️ Cleared your {list_name} list.",
+                        }.get(current_lang, f"🗑️ Cleared your {list_name} list."))
+                    elif action == "add" and items:
+                        for item in items:
+                            add_item(self.telegram_user_id, list_name, item)
+                        notes.append({
+                            "ru": f"📝 Добавил в список '{list_name}': {', '.join(items)}.",
+                            "uz": f"📝 '{list_name}' ro'yxatiga qo'shildi: {', '.join(items)}.",
+                            "en": f"📝 Added to your {list_name} list: {', '.join(items)}.",
+                        }.get(current_lang, f"📝 Added to your {list_name} list: {', '.join(items)}."))
+                    elif action == "remove" and items:
+                        removed = [item for item in items if remove_item(self.telegram_user_id, list_name, item)]
+                        if removed:
+                            notes.append({
+                                "ru": f"🗑️ Удалил из списка '{list_name}': {', '.join(removed)}.",
+                                "uz": f"🗑️ '{list_name}' ro'yxatidan o'chirildi: {', '.join(removed)}.",
+                                "en": f"🗑️ Removed from your {list_name} list: {', '.join(removed)}.",
+                            }.get(current_lang, f"🗑️ Removed from your {list_name} list: {', '.join(removed)}."))
+                except Exception as exc:
+                    logger.error("Fallback list action failed: %s", exc)
+
         if not handled.get("get_photo"):
             label = self._photo_get_label(message)
             if not label and self._photo_complaint(message):
@@ -760,6 +951,70 @@ class HermesAdapter:
         if not handled.get("export") and self._looks_like_export(message):
             self._pending_export = True
 
+        if not handled.get("cancel") and re.search(r"cancel|отмени|bekor|бэкор", message, re.IGNORECASE) and re.search(r"reminder|timer|напомин|eslat", message, re.IGNORECASE):
+            try:
+                pending = get_pending_reminders(self.telegram_user_id)
+                low = message.lower()
+                stop = {"cancel", "my", "the", "reminder", "timer", "to", "a", "an", "please", "отмени", "напоминание", "eslat", "eslatma", "мени"}
+                tokens = [t for t in re.findall(r"[a-z0-9а-я']+", low) if t not in stop and len(t) > 2]
+
+                def score(reminder):
+                    text = reminder["text"].lower()
+                    return sum(1 for token in tokens if token in text)
+
+                matches = [r for r in pending if score(r) > 0]
+                target = max(matches, key=lambda r: (score(r), r["id"])) if matches else (pending[-1] if len(pending) == 1 else None)
+                if target and cancel_reminder(self.telegram_user_id, target["id"]):
+                    notes.append({
+                        "ru": f"🗑️ Напоминание отменено: {target['text']}.",
+                        "uz": f"🗑️ Eslatma bekor qilindi: {target['text']}.",
+                        "en": f"🗑️ Cancelled reminder: {target['text']}.",
+                    }.get(current_lang, f"🗑️ Cancelled reminder: {target['text']}."))
+                elif pending:
+                    notes.append({
+                        "ru": "У вас несколько напоминаний — уточните, какое отменить.",
+                        "uz": "Bir nechta eslatma bor — qaysi birini bekor qilishni aniqroq ayting.",
+                        "en": "You have several reminders — tell me which one to cancel.",
+                    }.get(current_lang, "You have several reminders — tell me which one to cancel."))
+                else:
+                    notes.append({
+                        "ru": "Активных напоминаний нет.",
+                        "uz": "Faol eslatmalar yo'q.",
+                        "en": "You have no active reminders.",
+                    }.get(current_lang, "You have no active reminders."))
+            except Exception as exc:
+                logger.error("Fallback reminder cancel failed: %s", exc)
+
+        if not handled.get("reminder"):
+            clock = self._clock_reminder_request(message)
+            if clock and user and (user.get("timezone", "") or "").strip():
+                tz = parse_user_timezone(user["timezone"])
+                if tz is not None:
+                    hhmm, text = clock
+                    try:
+                        hour, minute = map(int, hhmm.split(":"))
+                        now_local = datetime.now(tz)
+                        target = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                        if target <= now_local:
+                            target += timedelta(days=1)
+                        seconds = max(1, int((target - now_local).total_seconds()))
+                        add_reminder(
+                            telegram_user_id=self.telegram_user_id,
+                            chat_id=self.chat_id,
+                            delay_seconds=seconds,
+                            text=text,
+                            language=current_lang,
+                        )
+                        handled["reminder"] = True
+                        when = target.strftime("%H:%M")
+                        response = {
+                            "ru": f"⏰ Напоминание установлено на {when}: {text}.",
+                            "uz": f"⏰ Eslatma {when} ga o'rnatildi: {text}.",
+                            "en": f"⏰ Reminder set for {when}: {text}.",
+                        }.get(current_lang, f"⏰ Reminder set for {when}: {text}.")
+                    except Exception as exc:
+                        logger.error("Fallback clock reminder failed: %s", exc)
+
         if not handled.get("reminder"):
             reminder = self._relative_reminder_request(message)
             if reminder:
@@ -778,11 +1033,15 @@ class HermesAdapter:
                         when = f"{seconds // 60}m {seconds % 60}s"
                     else:
                         when = f"{seconds}s"
-                    notes.append({
+                    note = {
                         "ru": f"⏰ Напоминание установлено: {text} — через {when}.",
                         "uz": f"⏰ Eslatma o'rnatildi: {text} — {when}dan keyin.",
                         "en": f"⏰ Reminder set: {text} — in {when}.",
-                    }.get(current_lang, f"⏰ Reminder set: {text} — in {when}."))
+                    }.get(current_lang, f"⏰ Reminder set: {text} — in {when}.")
+                    if re.search(r"which city|what city|where are you|hold on|just a moment|let me|каком городе|qaysi shahar", response, re.IGNORECASE):
+                        response = note
+                    else:
+                        notes.append(note)
                 except Exception as exc:
                     logger.error("Fallback reminder failed: %s", exc)
 
@@ -792,11 +1051,12 @@ class HermesAdapter:
                 name, event_date, event_type = event
                 try:
                     add_event(self.telegram_user_id, name, event_date, event_type)
-                    notes.append({
-                        "ru": f"🎂 Сохранено: {name} — {event_date}.",
-                        "uz": f"🎂 Saqlandi: {name} — {event_date}.",
-                        "en": f"🎂 Saved: {name} — {event_date}.",
-                    }.get(current_lang, f"🎂 Saved: {name} — {event_date}."))
+                    if not re.search(r"saved|сохран|saqland", response, re.IGNORECASE):
+                        notes.append({
+                            "ru": f"🎂 Сохранено: {name} — {event_date}.",
+                            "uz": f"🎂 Saqlandi: {name} — {event_date}.",
+                            "en": f"🎂 Saved: {name} — {event_date}.",
+                        }.get(current_lang, f"🎂 Saved: {name} — {event_date}."))
                 except Exception as exc:
                     logger.error("Fallback add event failed: %s", exc)
 
@@ -805,11 +1065,12 @@ class HermesAdapter:
             if name:
                 try:
                     if delete_event(self.telegram_user_id, name):
-                        notes.append({
-                            "ru": f"🗑️ Удалено: {name}.",
-                            "uz": f"🗑️ O'chirildi: {name}.",
-                            "en": f"🗑️ Deleted: {name}.",
-                        }.get(current_lang, f"🗑️ Deleted: {name}."))
+                        if not re.search(r"deleted|удал|o'chir", response, re.IGNORECASE):
+                            notes.append({
+                                "ru": f"🗑️ Удалено: {name}.",
+                                "uz": f"🗑️ O'chirildi: {name}.",
+                                "en": f"🗑️ Deleted: {name}.",
+                            }.get(current_lang, f"🗑️ Deleted: {name}."))
                     else:
                         notes.append({
                             "ru": f"Не нашёл событие: {name}.",
@@ -946,7 +1207,8 @@ class HermesAdapter:
             response = re.sub(r"\[SET_CITY:\s*.+?\]", "", response).strip()
 
             # Process list tags: [LIST_ADD: <list> | <item>], [LIST_REMOVE: ...], [LIST_CLEAR: <list>]
-            for list_name, item in re.findall(r"\[LIST_ADD:\s*(.+?)\s*\|\s*(.+?)\]", response):
+            list_add_matches = re.findall(r"\[LIST_ADD:\s*(.+?)\s*\|\s*(.+?)\]", response)
+            for list_name, item in list_add_matches:
                 try:
                     add_item(self.telegram_user_id, list_name, item)
                     logger.info("List add for user %d: %s | %s", self.telegram_user_id, list_name, item)
@@ -954,14 +1216,16 @@ class HermesAdapter:
                     logger.error("Failed to add list item: %s", exc)
             response = re.sub(r"\[LIST_ADD:\s*.+?\]", "", response).strip()
 
-            for list_name, item in re.findall(r"\[LIST_REMOVE:\s*(.+?)\s*\|\s*(.+?)\]", response):
+            list_remove_matches = re.findall(r"\[LIST_REMOVE:\s*(.+?)\s*\|\s*(.+?)\]", response)
+            for list_name, item in list_remove_matches:
                 try:
                     remove_item(self.telegram_user_id, list_name, item)
                 except Exception as exc:
                     logger.error("Failed to remove list item: %s", exc)
             response = re.sub(r"\[LIST_REMOVE:\s*.+?\]", "", response).strip()
 
-            for list_name in re.findall(r"\[LIST_CLEAR:\s*(.+?)\]", response):
+            list_clear_matches = re.findall(r"\[LIST_CLEAR:\s*(.+?)\]", response)
+            for list_name in list_clear_matches:
                 try:
                     clear_list(self.telegram_user_id, list_name)
                 except Exception as exc:
@@ -1082,6 +1346,11 @@ class HermesAdapter:
                     "search": bool(search_matches),
                     "translator": bool(translator_matches),
                     "voice": bool(voice_mode_matches),
+                    "contact": bool(contact_matches),
+                    "list_add": bool(list_add_matches),
+                    "list_remove": bool(list_remove_matches),
+                    "list_clear": bool(list_clear_matches),
+                    "cancel": bool(cancel_matches),
                     "get_photo": bool(get_photo_matches) or bool(self._pending_get_photo),
                     "delete_photo": bool(delete_photo_matches) or bool(self._pending_delete_photo),
                     "export": bool(self._pending_export),
