@@ -130,6 +130,8 @@ PYTHONPATH=. python -m unittest discover tests/ -v
 | `OPENROUTER_VISION_MODEL` | — | `openai/gpt-4o` | Vision/OCR model |
 | `OPENROUTER_IMAGE_MODEL` | — | `google/gemini-2.5-flash-image` | Image generation model |
 | `ELEVENLABS_API_KEY` | — | — | Voice input (STT) and voice replies (TTS) |
+| `MUXLISA_API_KEY` | — | — | Uzbek TTS via Muxlisa (used for `uz` voice replies when set) |
+| `MUXLISA_SPEAKER` | — | `1` | Muxlisa speaker id: `0` female, `1` male |
 | `DATABASE_PATH` | — | `data/app.db` | SQLite database path |
 | `DATA_DIR` | — | `data` | Root for profile directories and photo vault |
 | `LOG_LEVEL` | — | `INFO` | Python logging level |

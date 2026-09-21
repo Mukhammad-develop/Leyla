@@ -3,7 +3,8 @@ Translator engine — translates text and optionally generates a voice note.
 
 - Uses LLM for accurate translation with cultural adaptation
 - Adds pinyin on a separate line for Chinese outputs (using pypinyin)
-- Calls ElevenLabs TTS to produce a voice note in the target language
+- Calls Muxlisa TTS for Uzbek voice notes when MUXLISA_API_KEY is set,
+  otherwise falls back to ElevenLabs TTS
 """
 
 import logging
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 ELEVENLABS_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"  # Rachel — multilingual
 ELEVENLABS_MODEL_ID = "eleven_multilingual_v2"
+MUXLISA_TTS_URL = "https://service.muxlisa.uz/api/v2/tts"
 
 CHINESE_LANGS = {"zh", "zh-cn", "zh-tw", "zh-hans", "zh-hant", "mandarin", "cantonese", "chinese"}
 
@@ -153,16 +155,36 @@ def _ensure_pinyin(text: str) -> str:
         return text
 
 
+def _muxlisa_tts(clean_text: str) -> bytes | None:
+    """Uzbek TTS via Muxlisa. Returns WAV bytes or None."""
+    api_key = os.environ.get("MUXLISA_API_KEY")
+    if not api_key:
+        return None
+    try:
+        speaker = int(os.environ.get("MUXLISA_SPEAKER", "1"))
+    except ValueError:
+        speaker = 1
+    try:
+        resp = requests.post(
+            MUXLISA_TTS_URL,
+            headers={"Content-Type": "application/json", "x-api-key": api_key},
+            json={"text": clean_text[:512], "speaker": speaker},
+            timeout=30,
+        )
+        if resp.status_code == 200 and resp.content:
+            return resp.content
+        logger.error("Muxlisa TTS error %d: %s", resp.status_code, resp.text[:200])
+    except Exception as exc:
+        logger.error("Muxlisa TTS request failed: %s", exc)
+    return None
+
+
 def text_to_speech(text: str, target_lang: str) -> bytes | None:
     """
-    Call ElevenLabs TTS to produce an audio file.
-    Returns raw MP3 bytes on success, or None on failure.
+    Produce a voice note for target_lang.
+    Uzbek uses Muxlisa (WAV) when MUXLISA_API_KEY is set; otherwise ElevenLabs MP3.
+    Returns raw audio bytes on success, or None on failure.
     """
-    api_key = os.environ.get("ELEVENLABS_API_KEY")
-    if not api_key:
-        logger.warning("ELEVENLABS_API_KEY not set — skipping TTS")
-        return None
-
     # Strip markdown and pinyin lines for clean TTS
     clean_text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
     clean_text = re.sub(r"\*(.+?)\*", r"\1", clean_text)
@@ -174,6 +196,17 @@ def text_to_speech(text: str, target_lang: str) -> bytes | None:
     ).strip()
 
     if not clean_text:
+        return None
+
+    lang = (target_lang or "").lower().strip()
+    if lang.startswith("uz"):
+        audio = _muxlisa_tts(clean_text)
+        if audio:
+            return audio
+
+    api_key = os.environ.get("ELEVENLABS_API_KEY")
+    if not api_key:
+        logger.warning("ELEVENLABS_API_KEY not set — skipping TTS")
         return None
 
     try:

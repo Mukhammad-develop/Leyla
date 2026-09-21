@@ -194,9 +194,9 @@ def split_message(text: str, max_chars: int = 3500) -> list[str]:
     return chunks
 
 
-def _to_ogg_opus(mp3_bytes: bytes) -> io.BytesIO | None:
+def _to_ogg_opus(audio_bytes: bytes) -> io.BytesIO | None:
     """
-    Convert MP3 to OGG/Opus so Telegram renders a real voice-note bubble
+    Convert MP3/WAV to OGG/Opus so Telegram renders a real voice-note bubble
     (round player + waveform) instead of a generic audio file.
     Returns None when ffmpeg is unavailable or conversion fails.
     """
@@ -204,9 +204,10 @@ def _to_ogg_opus(mp3_bytes: bytes) -> io.BytesIO | None:
         return None
     tmp_in = tmp_out = None
     try:
-        fd, tmp_in = tempfile.mkstemp(suffix=".mp3")
+        in_suffix = ".wav" if audio_bytes.startswith(b"RIFF") else ".mp3"
+        fd, tmp_in = tempfile.mkstemp(suffix=in_suffix)
         with os.fdopen(fd, "wb") as f:
-            f.write(mp3_bytes)
+            f.write(audio_bytes)
         fd, tmp_out = tempfile.mkstemp(suffix=".ogg")
         os.close(fd)
         subprocess.run(
@@ -217,7 +218,7 @@ def _to_ogg_opus(mp3_bytes: bytes) -> io.BytesIO | None:
         with open(tmp_out, "rb") as f:
             return io.BytesIO(f.read())
     except Exception as exc:
-        logger.warning("MP3→OGG conversion failed: %s", exc)
+        logger.warning("Audio→OGG conversion failed: %s", exc)
         return None
     finally:
         for p in (tmp_in, tmp_out):

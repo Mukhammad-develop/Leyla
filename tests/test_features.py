@@ -10,6 +10,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 # ---------- isolated test environment BEFORE any app imports ----------
 _temp_dir = tempfile.mkdtemp(prefix="leyla_feat_test_")
@@ -27,6 +28,7 @@ from app.database.db import init_db  # noqa: E402
 from app.hermes.adapter import HermesAdapter  # noqa: E402
 from app.imagegen.generator import _bytes_from_image_value  # noqa: E402
 from app.telegram.formatting import format_telegram_html, strip_telegram_markdown  # noqa: E402
+from app.translator import engine as translator_engine  # noqa: E402
 from app.users.manager import (  # noqa: E402
     get_or_create_user,
     get_user,
@@ -271,6 +273,21 @@ class TestImageResponseParsing(unittest.TestCase):
         self.assertEqual(_bytes_from_image_value(payload), b"fake-image")
 
 
+class TestMuxlisaTTS(unittest.TestCase):
+    def test_uzbek_uses_muxlisa_when_configured(self):
+        with mock.patch.dict(os.environ, {"MUXLISA_API_KEY": "x", "MUXLISA_SPEAKER": "0", "ELEVENLABS_API_KEY": ""}):
+            with mock.patch.object(translator_engine.requests, "post") as post:
+                post.return_value.status_code = 200
+                post.return_value.content = b"wav"
+                post.return_value.text = "OK"
+                self.assertEqual(translator_engine.text_to_speech("Salom **dunyo** 😊", "uz"), b"wav")
+                args, kwargs = post.call_args
+                self.assertEqual(args[0], translator_engine.MUXLISA_TTS_URL)
+                self.assertEqual(kwargs["headers"]["x-api-key"], "x")
+                self.assertEqual(kwargs["json"]["speaker"], 0)
+                self.assertEqual(kwargs["json"]["text"], "Salom dunyo")
+
+
 class TestAdapterTagProcessing(unittest.TestCase):
     """The memory-loss fix: structured data lands in tables, not just history."""
 
@@ -281,6 +298,11 @@ class TestAdapterTagProcessing(unittest.TestCase):
     def _make_user(self, uid):
         user, _ = get_or_create_user(uid)
         return HermesAdapter(user["hermes_profile"], telegram_user_id=uid, chat_id=uid)
+
+    def test_prompt_requires_specific_next_step(self):
+        adapter = self._make_user(760000)
+        prompt = adapter._get_system_prompt("en")
+        self.assertIn("ONE specific next step", prompt)
 
     def test_shopping_list_survives_history_truncation(self):
         adapter = self._make_user(760001)
