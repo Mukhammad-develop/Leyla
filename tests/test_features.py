@@ -37,6 +37,8 @@ from app.users.manager import (  # noqa: E402
     update_user_city,
 )
 from app.lists.manager import add_item, remove_item, clear_list, get_all_lists  # noqa: E402
+from app.reminders.manager import get_pending_reminders  # noqa: E402
+from app.photo_vault.manager import save_photo  # noqa: E402
 from app.expenses.manager import add_expense, get_recent_expenses, get_month_totals  # noqa: E402
 from app.calories.manager import log_food, get_day_total, get_all_entries  # noqa: E402
 from app.events.manager import (  # noqa: E402
@@ -344,6 +346,60 @@ class TestAdapterTagProcessing(unittest.TestCase):
             getattr(adapter, "_pending_image_prompt", None),
             "Draw a 4 teachers teaching politics",
         )
+
+    def test_currency_and_search_intent_parsers(self):
+        self.assertEqual(
+            HermesAdapter._currency_request("How much is 100 USD in EUR?"),
+            ("USD", "EUR", 100.0),
+        )
+        self.assertEqual(
+            HermesAdapter._web_search_query("Search the web for current UTC date"),
+            "current utc date",
+        )
+
+    def test_translator_without_tag_sets_pending(self):
+        adapter = self._make_user(760009)
+        adapter.send_message("Turn on translator to Chinese", "en")
+        self.assertEqual(getattr(adapter, "_pending_translator_update", None), "zh")
+        adapter.send_message("Turn off translator", "en")
+        self.assertEqual(getattr(adapter, "_pending_translator_update", None), "off")
+
+    def test_export_without_tag_sets_pending(self):
+        adapter = self._make_user(760010)
+        adapter.send_message("Send me my data", "en")
+        self.assertTrue(getattr(adapter, "_pending_export", False))
+
+    def test_photo_get_delete_without_tag_sets_pending(self):
+        adapter = self._make_user(760011)
+        adapter.send_message("Send me my e2e doc photo", "en")
+        self.assertEqual(getattr(adapter, "_pending_get_photo", None), "e2e doc")
+        adapter.send_message("Delete my e2e doc photo", "en")
+        self.assertEqual(getattr(adapter, "_pending_delete_photo", None), "e2e doc")
+
+    def test_photo_complaint_retries_single_saved_photo(self):
+        src = os.path.join(_temp_dir, "e2e_photo.jpg")
+        with open(src, "wb") as f:
+            f.write(b"jpg")
+        self.assertTrue(save_photo(760014, "e2e doc", src))
+        adapter = self._make_user(760014)
+        prompt = adapter._get_system_prompt("en")
+        self.assertIn("NEVER say you cannot display/send images", prompt)
+        self.assertIn("e2e doc", prompt)
+        adapter.send_message("I can't see the photo", "en")
+        self.assertEqual(getattr(adapter, "_pending_get_photo", None), "e2e doc")
+
+    def test_relative_timer_without_tag_creates_reminder(self):
+        adapter = self._make_user(760012)
+        response = adapter.send_message("Set a timer for 70 seconds to breathe", "en")
+        self.assertIn("Reminder set", response)
+        pending = get_pending_reminders(760012)
+        self.assertTrue(any("breathe" in r["text"] for r in pending))
+
+    def test_birthday_without_tag_saves_event(self):
+        adapter = self._make_user(760013)
+        adapter.send_message("E2EFallback birthday: 2030-01-01", "en")
+        events = get_all_events(760013)
+        self.assertTrue(any(e["name"] == "e2efallback" and e["event_date"] == "2030-01-01" for e in events))
 
 
 def tearDownModule():

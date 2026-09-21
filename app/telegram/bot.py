@@ -158,6 +158,12 @@ IMAGE_FAILED_MESSAGES = {
     "uz": "❌ Rasm yarata olmadim. Qaytadan urinib ko'ring.",
 }
 
+VOICE_UNAVAILABLE_MESSAGES = {
+    "ru": "🔇 Голосовые ответы сейчас недоступны, поэтому отвечаю текстом.",
+    "en": "🔇 Voice replies are unavailable right now, so I'll answer in text.",
+    "uz": "🔇 Ovozli javoblar hozir mavjud emas, shuning uchun matnda javob beraman.",
+}
+
 
 def split_message(text: str, max_chars: int = 3500) -> list[str]:
     if not text:
@@ -243,9 +249,12 @@ def _deliver_response(bot, chat_id, user, response_text):
         audio_bytes = text_to_speech(response_text[:TTS_MAX_CHARS], lang)
         if audio_bytes:
             bot.send_voice(chat_id, _to_ogg_opus(audio_bytes) or io.BytesIO(audio_bytes))
-        elif mode == "voice":
-            # TTS unavailable — never leave the user with silence
-            _send_text_chunks(bot, chat_id, response_text)
+        else:
+            note = VOICE_UNAVAILABLE_MESSAGES.get(lang, VOICE_UNAVAILABLE_MESSAGES["en"])
+            bot.send_message(chat_id, note)
+            if mode == "voice":
+                # TTS unavailable — never leave the user with silence
+                _send_text_chunks(bot, chat_id, response_text)
 
 
 def _process_translator_mode(bot, chat_id, text, target_lang, lang_code):

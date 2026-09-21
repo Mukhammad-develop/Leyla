@@ -204,7 +204,8 @@ class HermesAdapter:
                 f"• The user's timezone is ALREADY SAVED as '{user_tz_str}'.\n"
                 f"• Their exact current local time is: {user_local_now.strftime('%H:%M:%S')}.\n"
                 f"• When setting reminders for a specific clock time (e.g. 'at 18:00', 'tomorrow 09:00'), "
-                f"calculate the exact seconds difference from their local time ({user_local_now.strftime('%H:%M')}).\n"
+                f"use this saved timezone and calculate the exact seconds difference from their local time ({user_local_now.strftime('%H:%M')}).\n"
+                "• Do NOT ask where they are or ask for confirmation again when the timezone is already saved — set the reminder immediately.\n"
                 f"• If the user mentions moving or changing their city/country (e.g. 'I am in Dubai now' or 'Men Toshkentdaman'), "
                 f"update their timezone by appending `[SET_TIMEZONE: <IANA_or_offset>]` and their city with `[SET_CITY: <city in English>]`.\n"
             )
@@ -236,6 +237,13 @@ class HermesAdapter:
             f"Your name is {name}.\n"
             "Imagine yourself as a helpful companion with a computer who assists the user with everyday "
             "tasks, calculations, expenses, researching, writing, and organizing their day.\n\n"
+            "WHO YOU ARE & WHAT YOU CAN ACCESS (CRITICAL):\n"
+            "• You are Laila, a Telegram bot. You CAN send text, photos, documents, and voice replies in Telegram.\n"
+            "• NEVER say you cannot display/send images. If the user asks for a saved photo, retrieve it with `[GET_PHOTO: <label>]`.\n"
+            "• NEVER tell the user to download something from a 'vault' themselves — if it is saved for them, fetch it for them.\n"
+            "• You have access ONLY to this user's saved data shown in the sections below: reminders, contacts, photo vault labels, lists, expenses, calories, events, city/timezone, and chat history.\n"
+            "• If something is not in those sections, say you don't have it and offer to save it — do not invent access.\n"
+            "• If a saved photo label exists in 'User Photo Vault', use that exact label. If the user says they can't see the photo after you promised it, retry sending it instead of apologizing.\n\n"
             f"{tz_section}\n"
             f"The user's current preferred language code is: '{current_lang}'.\n"
             "You MUST respond primarily in that language unless the user asks to switch.\n\n"
@@ -250,8 +258,10 @@ class HermesAdapter:
             "• Many capabilities below work ONLY through bracketed tags such as [REMINDER: ...], [LIST_ADD: ...], "
             "[EXPENSE: ...], [LOG_FOOD: ...], [ADD_EVENT: ...], [SET_TIMEZONE: ...].\n"
             "• Tags are executed by the system and REMOVED from your message — the user never sees them.\n"
-            "• NEVER claim you saved, logged, set, added, or deleted something without appending the matching tag "
-            "in that SAME reply. Without the tag, the action simply does not happen.\n\n"
+            "• NEVER claim you saved, logged, set, added, fetched, or deleted something without appending the matching tag "
+            "in that SAME reply. Without the tag, the action simply does not happen.\n"
+            "• NEVER say 'let me fetch', 'one moment', 'hold on', or 'just a moment' unless the matching tag is present in that SAME reply.\n"
+            "• After a tag is present, finish the reply with the actual result or a clear final confirmation/error — do not stop at 'I will do it'.\n\n"
             "⏰ TIMERS & REMINDERS (NATIVE CAPABILITY):\n"
             "• You HAVE full ability to set real timers, alarms, and reminders for the user!\n"
             "• NEVER tell the user that you cannot set timers, alarms, or reminders. You CAN and MUST!\n"
@@ -282,7 +292,7 @@ class HermesAdapter:
             "  - '100 dollar necha so'm?' -> Append `[CURRENCY: USD | UZS | 100]`\n"
             "  - 'Сколько рублей в 50 евро?' -> Append `[CURRENCY: EUR | RUB | 50]`\n"
             "  - 'Convert 200 GBP to USD' -> Append `[CURRENCY: GBP | USD | 200]`\n"
-            "• The system will fetch the live rate and include it in the next context. Tell the user you are fetching live rates.\n\n"
+            "• The system fetches the live rate and appends it to your reply. NEVER estimate or invent an exchange rate; if there is no `[CURRENCY: ...]` tag, there is no conversion.\n\n"
             "🕌 PRAYER TIMES (NATIVE CAPABILITY):\n"
             "• You can fetch today's real prayer times for any city!\n"
             "• When the user asks for prayer times (e.g. 'Toshkentda namoz vaqtlari', 'время намаза в Москве', 'prayer times in Dubai'), "
@@ -473,6 +483,346 @@ class HermesAdapter:
             or re.search(r"(chiz|yarat).{0,25}(rasm|surat)", low)
         )
 
+    @staticmethod
+    def _money_code(token: str) -> str | None:
+        t = token.strip().lower().strip("'’")
+        iso = {"USD", "EUR", "UZS", "RUB", "GBP", "KZT", "TRY", "CNY", "JPY", "KRW", "AED", "INR"}
+        if t.upper() in iso:
+            return t.upper()
+        return {
+            "$": "USD", "dollar": "USD", "dollars": "USD", "buck": "USD", "bucks": "USD",
+            "€": "EUR", "euro": "EUR", "euros": "EUR",
+            "sum": "UZS", "som": "UZS", "so'm": "UZS", "so`m": "UZS",
+            "ruble": "RUB", "rubles": "RUB", "rubl": "RUB",
+            "pound": "GBP", "pounds": "GBP",
+        }.get(t)
+
+    @classmethod
+    def _currency_request(cls, text: str):
+        low = text.lower()
+        m = re.search(r"(\d+(?:[.,]\d+)?)\s*([a-z$€'’]{1,14})\s*(?:to|into|in)\s*([a-z$€'’]{1,14})", low)
+        if not m:
+            return None
+        from_code = cls._money_code(m.group(2))
+        to_code = cls._money_code(m.group(3))
+        if not from_code or not to_code or from_code == to_code:
+            return None
+        try:
+            amount = float(m.group(1).replace(",", ""))
+        except ValueError:
+            return None
+        return from_code, to_code, amount
+
+    @staticmethod
+    def _web_search_query(text: str) -> str | None:
+        low = text.lower().strip()
+        triggers = ("search", "look up", "find online", "latest news", "news today", "current news", "web search")
+        if not any(t in low for t in triggers):
+            return None
+        query = re.sub(r"^(please\s+)?(search( the web)? for|look up|find online|web search for)\s*", "", low).strip()
+        return query or text.strip()
+
+    @staticmethod
+    def _looks_like_export(text: str) -> bool:
+        low = text.lower()
+        return bool(
+            ("export" in low and "data" in low)
+            or "send me my data" in low
+            or "download my data" in low
+            or "мои данные" in low
+            or "ma'lumotlarim" in low
+        )
+
+    @staticmethod
+    def _photo_get_label(text: str) -> str | None:
+        low = text.lower()
+        patterns = (
+            r"send me my (.+?) photo", r"send my (.+?) photo", r"show me my (.+?) photo",
+            r"get my (.+?) photo", r"retrieve my (.+?) photo", r"give me my (.+?) photo",
+        )
+        for pattern in patterns:
+            m = re.search(pattern, low)
+            if m:
+                return m.group(1).strip(" .'\"")
+        return None
+
+    @staticmethod
+    def _photo_delete_label(text: str) -> str | None:
+        low = text.lower()
+        for pattern in (r"delete my (.+?) photo", r"delete (.+?) photo", r"remove my (.+?) photo"):
+            m = re.search(pattern, low)
+            if m:
+                return m.group(1).strip(" .'\"")
+        return None
+
+    @staticmethod
+    def _photo_complaint(text: str) -> bool:
+        low = text.lower()
+        return bool(
+            ("can't see" in low or "cant see" in low or "cannot see" in low or "don't see" in low or "do not see" in low)
+            and ("photo" in low or "picture" in low or "image" in low)
+        ) or ("no photo" in low) or ("where is the photo" in low) or ("where's the photo" in low)
+
+    @staticmethod
+    def _normalize_lang_code(value: str) -> str:
+        low = value.strip().lower()
+        if low in {"off", "none", "disable", "stop"}:
+            return "off"
+        mapping = {
+            "chinese": "zh", "zh": "zh", "mandarin": "zh",
+            "english": "en", "en": "en",
+            "russian": "ru", "ru": "ru",
+            "uzbek": "uz", "uz": "uz",
+            "german": "de", "de": "de",
+            "french": "fr", "fr": "fr",
+            "spanish": "es", "es": "es",
+            "italian": "it", "it": "it",
+            "arabic": "ar", "ar": "ar",
+            "korean": "ko", "ko": "ko",
+            "japanese": "ja", "ja": "ja",
+            "turkish": "tr", "tr": "tr",
+        }
+        return mapping.get(low, low[:2])
+
+    @classmethod
+    def _translator_request(cls, text: str) -> str | None:
+        low = text.lower()
+        if "translator" not in low and "перевод" not in low and "tarjimon" not in low:
+            return None
+        if " off" in low or "turn off" in low or "disable" in low or "выключ" in low or "o'chir" in low:
+            return "off"
+        if not (" on" in low or "turn on" in low or "enable" in low or " to " in low or "на " in low or "ga " in low):
+            return None
+        for name in ("chinese", "mandarin", "english", "russian", "uzbek", "german", "french", "spanish", "italian", "arabic", "korean", "japanese", "turkish"):
+            if name in low:
+                return cls._normalize_lang_code(name)
+        m = re.search(r"\b(zh|en|ru|uz|de|fr|es|it|ar|ko|ja|tr)\b", low)
+        return m.group(1) if m else None
+
+    @staticmethod
+    def _voice_mode_request(text: str) -> str | None:
+        low = text.lower()
+        if "text and voice" in low or "voice and text" in low or "both text and voice" in low or "both voice and text" in low:
+            return "both"
+        if "voice only" in low or "only voice" in low or "answer with voice" in low or "reply with voice" in low or "отвечай голосом" in low or "ovozli javob" in low:
+            return "voice"
+        if "text only" in low or "only text" in low or "answer with text" in low or "reply with text" in low or "отвечай текстом" in low or "matn bilan javob" in low:
+            return "text"
+        return None
+
+    @staticmethod
+    def _relative_reminder_request(text: str):
+        low = text.lower()
+        m = re.search(
+            r"(?:set (?:a )?timer for|remind me in| напомни через | eslat )\s*(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|секунд\w*|минут\w*|час\w*|soat|daqiqa|soniya)\s*(?:to\s+(.+))?",
+            low,
+        )
+        if not m:
+            return None
+        amount = int(m.group(1))
+        unit = m.group(2)
+        seconds = amount
+        if unit.startswith(("min", "мин", "daqiqa")):
+            seconds = amount * 60
+        elif unit.startswith(("hour", "hr", "час", "soat")):
+            seconds = amount * 3600
+        reminder_text = (m.group(3) or "Timer").strip(" .")
+        return seconds, reminder_text
+
+    @staticmethod
+    def _parse_event_date(value: str) -> str | None:
+        value = value.strip()
+        m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", value)
+        if m:
+            return m.group(1)
+        for fmt in ("%B %d, %Y", "%B %d %Y", "%d %B %Y", "%d %B, %Y"):
+            try:
+                return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+        m = re.search(r"\b([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?\b", value)
+        if m:
+            try:
+                return datetime.strptime(f"{m.group(1)} {m.group(2)} 1990", "%B %d %Y").strftime("%Y-%m-%d")
+            except ValueError:
+                return None
+        return None
+
+    @classmethod
+    def _event_add_request(cls, text: str):
+        low = text.lower()
+        if "birthday is" not in low and "birthday" not in low:
+            return None
+        if "birthday is" in low:
+            name_part, date_part = re.split(r"birthday is", low, maxsplit=1)
+        else:
+            m = re.search(r"(.+?)(?:['’]s)?\s+birthday[:]?\s*(.+)", low)
+            if not m:
+                return None
+            name_part, date_part = m.group(1), m.group(2)
+        name = re.sub(r"^(my|our)\s+", "", name_part).strip(" .'\"")
+        name = re.sub(r"(friend|mom|dad|mother|father|brother|sister)\s+", "", name).strip(" .'\"") or name_part.strip(" .'\"")
+        event_date = cls._parse_event_date(date_part)
+        if not name or not event_date:
+            return None
+        return name, event_date, "birthday"
+
+    @staticmethod
+    def _event_delete_request(text: str) -> str | None:
+        low = text.lower()
+        m = re.search(r"delete event\s+(.+)", low)
+        if m:
+            return m.group(1).strip(" .'\"")
+        m = re.search(r"delete\s+(.+?)(?:['’]s)?\s+birthday", low)
+        if m:
+            return m.group(1).strip(" .'\"")
+        return None
+
+    def _apply_action_fallbacks(self, message: str, response: str, current_lang: str, handled: dict, history: list) -> str:
+        """Run obvious native actions when the model promised them but forgot the tag."""
+        notes = []
+
+        if not handled.get("currency"):
+            req = self._currency_request(message)
+            if req:
+                from_code, to_code, amount = req
+                try:
+                    response = (response + "\n\n" + convert_currency(from_code, to_code, amount)).strip()
+                except Exception as exc:
+                    logger.error("Fallback currency conversion failed: %s", exc)
+                    notes.append({
+                        "ru": "❌ Не удалось получить живой курс сейчас. Попробуйте ещё раз.",
+                        "uz": "❌ Hozir jonli kursni olib bo'lmadi. Qaytadan urinib ko'ring.",
+                        "en": "❌ I couldn't fetch the live rate right now. Please try again.",
+                    }.get(current_lang, "❌ I couldn't fetch the live rate right now. Please try again."))
+
+        if not handled.get("search"):
+            query = self._web_search_query(message)
+            if query:
+                try:
+                    results = web_search(query)
+                    response = (response + "\n\n" + format_search_results(results, lang=current_lang)).strip()
+                except Exception as exc:
+                    logger.error("Fallback web search failed: %s", exc)
+                    notes.append({
+                        "ru": "❌ Поиск сейчас не сработал. Попробуйте ещё раз.",
+                        "uz": "❌ Qidiruv hozir ishlamadi. Qaytadan urinib ko'ring.",
+                        "en": "❌ Search failed right now. Please try again.",
+                    }.get(current_lang, "❌ Search failed right now. Please try again."))
+
+        if not handled.get("translator"):
+            translator = self._translator_request(message)
+            if translator:
+                self._pending_translator_update = translator
+                if translator == "off":
+                    notes.append({
+                        "ru": "🌐 Переводчик выключен.",
+                        "uz": "🌐 Tarjimon o'chirildi.",
+                        "en": "🌐 Translator is off.",
+                    }.get(current_lang, "🌐 Translator is off."))
+                else:
+                    notes.append({
+                        "ru": f"🌐 Переводчик включён: {translator}.",
+                        "uz": f"🌐 Tarjimon yoqildi: {translator}.",
+                        "en": f"🌐 Translator is on: {translator}.",
+                    }.get(current_lang, f"🌐 Translator is on: {translator}."))
+
+        if not handled.get("voice"):
+            mode = self._voice_mode_request(message)
+            if mode:
+                try:
+                    update_voice_mode(self.telegram_user_id, mode)
+                except Exception as exc:
+                    logger.error("Fallback voice mode failed: %s", exc)
+
+        if not handled.get("get_photo"):
+            label = self._photo_get_label(message)
+            if not label and self._photo_complaint(message):
+                try:
+                    photos = list_photos(self.telegram_user_id)
+                    if len(photos) == 1:
+                        label = photos[0]["label"]
+                    elif photos:
+                        recent_text = "\n".join((m.get("content") or "") for m in history[-12:]).lower()
+                        matches = [p["label"] for p in photos if p["label"].lower() in recent_text]
+                        if matches:
+                            label = max(matches, key=lambda item: recent_text.rfind(item.lower()))
+                except Exception as exc:
+                    logger.error("Fallback photo retry failed: %s", exc)
+            if label:
+                self._pending_get_photo = label
+
+        if not handled.get("delete_photo"):
+            label = self._photo_delete_label(message)
+            if label:
+                self._pending_delete_photo = label
+
+        if not handled.get("export") and self._looks_like_export(message):
+            self._pending_export = True
+
+        if not handled.get("reminder"):
+            reminder = self._relative_reminder_request(message)
+            if reminder:
+                seconds, text = reminder
+                try:
+                    add_reminder(
+                        telegram_user_id=self.telegram_user_id,
+                        chat_id=self.chat_id,
+                        delay_seconds=seconds,
+                        text=text,
+                        language=current_lang,
+                    )
+                    if seconds >= 3600:
+                        when = f"{seconds // 3600}h {(seconds % 3600) // 60}m"
+                    elif seconds >= 60:
+                        when = f"{seconds // 60}m {seconds % 60}s"
+                    else:
+                        when = f"{seconds}s"
+                    notes.append({
+                        "ru": f"⏰ Напоминание установлено: {text} — через {when}.",
+                        "uz": f"⏰ Eslatma o'rnatildi: {text} — {when}dan keyin.",
+                        "en": f"⏰ Reminder set: {text} — in {when}.",
+                    }.get(current_lang, f"⏰ Reminder set: {text} — in {when}."))
+                except Exception as exc:
+                    logger.error("Fallback reminder failed: %s", exc)
+
+        if not handled.get("event_add"):
+            event = self._event_add_request(message)
+            if event:
+                name, event_date, event_type = event
+                try:
+                    add_event(self.telegram_user_id, name, event_date, event_type)
+                    notes.append({
+                        "ru": f"🎂 Сохранено: {name} — {event_date}.",
+                        "uz": f"🎂 Saqlandi: {name} — {event_date}.",
+                        "en": f"🎂 Saved: {name} — {event_date}.",
+                    }.get(current_lang, f"🎂 Saved: {name} — {event_date}."))
+                except Exception as exc:
+                    logger.error("Fallback add event failed: %s", exc)
+
+        if not handled.get("event_delete"):
+            name = self._event_delete_request(message)
+            if name:
+                try:
+                    if delete_event(self.telegram_user_id, name):
+                        notes.append({
+                            "ru": f"🗑️ Удалено: {name}.",
+                            "uz": f"🗑️ O'chirildi: {name}.",
+                            "en": f"🗑️ Deleted: {name}.",
+                        }.get(current_lang, f"🗑️ Deleted: {name}."))
+                    else:
+                        notes.append({
+                            "ru": f"Не нашёл событие: {name}.",
+                            "uz": f"Topilmadi: {name}.",
+                            "en": f"I couldn't find an event named: {name}.",
+                        }.get(current_lang, f"I couldn't find an event named: {name}."))
+                except Exception as exc:
+                    logger.error("Fallback delete event failed: %s", exc)
+
+        if notes:
+            response = (response + "\n\n" + "\n".join(notes)).strip()
+        return response
+
 
     # ---- Public entry point -----------------------------------------------
 
@@ -573,7 +923,7 @@ class HermesAdapter:
             self._pending_translator_update = None
             if translator_matches:
                 val = translator_matches[-1].strip()
-                self._pending_translator_update = val  # 'off' or a lang code
+                self._pending_translator_update = self._normalize_lang_code(val)  # 'off' or a lang code
             response = re.sub(r"\[SET_TRANSLATOR:\s*.+?\]", "", response).strip()
 
             # Process [GET_PHOTO: <label>] and [DELETE_PHOTO: <label>] — store for bot.py
@@ -666,7 +1016,8 @@ class HermesAdapter:
             response = re.sub(r"\[ADD_EVENT:\s*.+?\]", "", response).strip()
 
             # Process [DELETE_EVENT: <name>] tags
-            for ev_name in re.findall(r"\[DELETE_EVENT:\s*(.+?)\]", response):
+            delete_event_matches = re.findall(r"\[DELETE_EVENT:\s*(.+?)\]", response)
+            for ev_name in delete_event_matches:
                 try:
                     delete_event(self.telegram_user_id, ev_name.strip())
                 except Exception as exc:
@@ -721,6 +1072,25 @@ class HermesAdapter:
                 except Exception as exc:
                     logger.error("Failed to set briefing time: %s", exc)
             response = re.sub(r"\[BRIEFING_TIME:\s*\d{1,2}:\d{2}\]", "", response).strip()
+
+            response = self._apply_action_fallbacks(
+                message,
+                response,
+                current_lang,
+                handled={
+                    "currency": bool(currency_matches),
+                    "search": bool(search_matches),
+                    "translator": bool(translator_matches),
+                    "voice": bool(voice_mode_matches),
+                    "get_photo": bool(get_photo_matches) or bool(self._pending_get_photo),
+                    "delete_photo": bool(delete_photo_matches) or bool(self._pending_delete_photo),
+                    "export": bool(self._pending_export),
+                    "reminder": bool(rem_matches),
+                    "event_add": bool(event_matches),
+                    "event_delete": bool(delete_event_matches),
+                },
+                history=history,
+            )
 
             history.append({"role": "user", "content": message})
             history.append({"role": "assistant", "content": response})
