@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.database.db import init_db  # noqa: E402
 from app.hermes.adapter import HermesAdapter  # noqa: E402
+from app.imagegen.generator import _bytes_from_image_value  # noqa: E402
 from app.telegram.formatting import format_telegram_html, strip_telegram_markdown  # noqa: E402
 from app.users.manager import (  # noqa: E402
     get_or_create_user,
@@ -260,6 +261,14 @@ class TestTelegramFormatting(unittest.TestCase):
         )
 
 
+class TestImageResponseParsing(unittest.TestCase):
+    def test_data_url_and_raw_base64_decode(self):
+        import base64
+        payload = base64.b64encode(b"fake-image").decode()
+        self.assertEqual(_bytes_from_image_value(f"data:image/png;base64,{payload}"), b"fake-image")
+        self.assertEqual(_bytes_from_image_value(payload), b"fake-image")
+
+
 class TestAdapterTagProcessing(unittest.TestCase):
     """The memory-loss fix: structured data lands in tables, not just history."""
 
@@ -327,6 +336,14 @@ class TestAdapterTagProcessing(unittest.TestCase):
         adapter = self._make_user(760007)
         adapter.send_message("Export my data please", "en")
         self.assertTrue(getattr(adapter, "_pending_export", False))
+
+    def test_image_request_without_tag_still_sets_pending_prompt(self):
+        adapter = self._make_user(760008)
+        adapter.send_message("Draw a 4 teachers teaching politics", "en")
+        self.assertEqual(
+            getattr(adapter, "_pending_image_prompt", None),
+            "Draw a 4 teachers teaching politics",
+        )
 
 
 def tearDownModule():

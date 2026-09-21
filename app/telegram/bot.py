@@ -421,6 +421,8 @@ def _process_and_reply(bot, chat_id, telegram_id, user, text: str) -> None:
                 bot.send_message(chat_id, err)
         except Exception:
             logger.error("Image generation handling failed:\n%s", traceback.format_exc())
+            err = IMAGE_FAILED_MESSAGES.get(user.get("language"), IMAGE_FAILED_MESSAGES["en"])
+            bot.send_message(chat_id, err)
 
     # Handle Data Export request
     if getattr(hermes, "_pending_export", False):

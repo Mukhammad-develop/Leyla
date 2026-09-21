@@ -462,6 +462,17 @@ class HermesAdapter:
 
         return prompt
 
+    @staticmethod
+    def _looks_like_image_request(text: str) -> bool:
+        low = text.lower()
+        return bool(
+            re.search(r"\b(draw|paint|sketch|illustrate)\b", low)
+            or re.search(r"\b(generate|create|make)\b.{0,50}\b(image|picture|photo|art|logo|poster)\b", low)
+            or re.search(r"нарис|картинк|изображени", low)
+            or re.search(r"(rasm|surat).{0,25}(chiz|yarat|tashla)", low)
+            or re.search(r"(chiz|yarat).{0,25}(rasm|surat)", low)
+        )
+
 
     # ---- Public entry point -----------------------------------------------
 
@@ -673,9 +684,12 @@ class HermesAdapter:
                     logger.error("Weather fetch failed: %s", exc)
 
             # Process [GENERATE_IMAGE: <prompt>] — store for bot.py
-            image_matches = re.findall(r"\[GENERATE_IMAGE:\s*(.+?)\]", response)
+            image_matches = re.findall(r"\[GENERATE_IMAGE:\s*([\s\S]+?)\]", response)
             self._pending_image_prompt = image_matches[-1].strip() if image_matches else None
-            response = re.sub(r"\[GENERATE_IMAGE:\s*.+?\]", "", response).strip()
+            response = re.sub(r"\[GENERATE_IMAGE:\s*[\s\S]+?\]", "", response).strip()
+            if not self._pending_image_prompt and self._looks_like_image_request(message):
+                # The model sometimes says "I'm generating..." but forgets the tag.
+                self._pending_image_prompt = message.strip()
 
             # Process [EXPORT_DATA] — store for bot.py
             self._pending_export = bool(re.search(r"\[EXPORT_DATA\]", response))

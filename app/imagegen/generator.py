@@ -18,6 +18,43 @@ logger = logging.getLogger(__name__)
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
+def _bytes_from_image_value(value: str) -> bytes | None:
+    """Decode a data URL, remote image URL, or raw base64 payload."""
+    value = (value or "").strip()
+    if not value:
+        return None
+    if value.startswith("data:") and ";base64," in value:
+        return base64.b64decode(value.split(";base64,", 1)[1])
+    if value.startswith("http://") or value.startswith("https://"):
+        resp = requests.get(value, timeout=30)
+        if resp.status_code == 200 and resp.content:
+            return resp.content
+        return None
+    try:
+        return base64.b64decode(value, validate=True)
+    except Exception:
+        return None
+
+
+def _iter_image_values(message: dict):
+    """Yield possible image payloads from known OpenRouter response shapes."""
+    for img in message.get("images") or []:
+        if isinstance(img, str):
+            yield img
+        elif isinstance(img, dict):
+            yield (img.get("image_url") or {}).get("url", "")
+            yield img.get("url", "")
+            yield img.get("b64_json", "")
+
+    content = message.get("content")
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict):
+                yield (part.get("image_url") or {}).get("url", "")
+                yield part.get("url", "")
+                yield part.get("b64_json", "")
+
+
 def generate_image(prompt: str) -> bytes | None:
     """Generate an image from a text prompt. Returns image bytes or None."""
     api_key = os.environ.get("OPENROUTER_API_KEY")
@@ -48,13 +85,17 @@ def generate_image(prompt: str) -> bytes | None:
             return None
 
         data = resp.json()
-        images = (data.get("choices") or [{}])[0].get("message", {}).get("images") or []
-        for img in images:
-            url = (img.get("image_url") or {}).get("url", "")
-            if url.startswith("data:") and ";base64," in url:
-                b64 = url.split(";base64,", 1)[1]
-                return base64.b64decode(b64)
-        logger.error("Image gen: no images in response: %s", str(data)[:300])
+        message = (data.get("choices") or [{}])[0].get("message", {}) or {}
+        for value in _iter_image_values(message):
+            try:
+                img_bytes = _bytes_from_image_value(value)
+            except Exception as exc:
+                logger.warning("Image gen: could not decode image payload: %s", exc)
+                continue
+            if img_bytes:
+                return img_bytes
+
+        logger.error("Image gen: no images in response: %s", str(data)[:500])
         return None
     except Exception as exc:
         logger.error("Image generation failed: %s", exc)
