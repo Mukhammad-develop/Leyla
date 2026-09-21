@@ -649,11 +649,16 @@ class HermesAdapter:
     @staticmethod
     def _voice_mode_request(text: str) -> str | None:
         low = text.lower()
-        if "text and voice" in low or "voice and text" in low or "both text and voice" in low or "both voice and text" in low:
+        if (
+            "text and voice" in low or "voice and text" in low
+            or "both text and voice" in low or "both voice and text" in low
+            or "matn va ovoz" in low or "ovoz va matn" in low
+            or "текст и голос" in low or "голос и текст" in low
+        ):
             return "both"
-        if "voice only" in low or "only voice" in low or "answer with voice" in low or "reply with voice" in low or "отвечай голосом" in low or "ovozli javob" in low:
+        if "voice only" in low or "only voice" in low or "answer with voice" in low or "reply with voice" in low or "отвечай голосом" in low or "только голосом" in low or "ovozli javob" in low or "faqat ovozli" in low:
             return "voice"
-        if "text only" in low or "only text" in low or "answer with text" in low or "reply with text" in low or "отвечай текстом" in low or "matn bilan javob" in low:
+        if "text only" in low or "only text" in low or "answer with text" in low or "reply with text" in low or "отвечай текстом" in low or "только текстом" in low or "matn bilan javob" in low or "faqat matn" in low:
             return "text"
         return None
 

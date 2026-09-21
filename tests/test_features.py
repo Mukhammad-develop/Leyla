@@ -452,6 +452,11 @@ class TestAdapterTagProcessing(unittest.TestCase):
         adapter.send_message("Cancel my reminder to e2e cancelme", "en")
         self.assertFalse(any("cancelme" in r["text"] for r in get_pending_reminders(760018)))
 
+    def test_uzbek_text_and_voice_sets_both(self):
+        adapter = self._make_user(760019)
+        adapter.send_message("Matn va ovoz bilan javob ber", "uz")
+        self.assertEqual(get_user(760019)["voice_mode"], "both")
+
 
 def tearDownModule():
     shutil.rmtree(_temp_dir, ignore_errors=True)
