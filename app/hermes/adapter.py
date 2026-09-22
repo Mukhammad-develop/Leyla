@@ -782,6 +782,10 @@ class HermesAdapter:
                 return "one", contact
         return None
 
+    @staticmethod
+    def _confirmed(response: str, *patterns: str) -> bool:
+        return any(re.search(pattern, response, re.IGNORECASE) for pattern in patterns)
+
     def _apply_action_fallbacks(self, message: str, response: str, current_lang: str, handled: dict, history: list) -> str:
         """Run obvious native actions when the model promised them but forgot the tag."""
         notes = []
@@ -873,11 +877,12 @@ class HermesAdapter:
                 name, phone = save_req
                 try:
                     save_contact(self.telegram_user_id, name, phone)
-                    notes.append({
-                        "ru": f"📞 Контакт сохранён: {name} — {phone}.",
-                        "uz": f"📞 Kontakt saqlandi: {name} — {phone}.",
-                        "en": f"📞 Contact saved: {name} — {phone}.",
-                    }.get(current_lang, f"📞 Contact saved: {name} — {phone}."))
+                    if not self._confirmed(response, r"contact saved", r"saved the contact", r"контакт сохранён", r"kontakt saqlandi"):
+                        notes.append({
+                            "ru": f"📞 Контакт сохранён: {name} — {phone}.",
+                            "uz": f"📞 Kontakt saqlandi: {name} — {phone}.",
+                            "en": f"📞 Contact saved: {name} — {phone}.",
+                        }.get(current_lang, f"📞 Contact saved: {name} — {phone}."))
                 except Exception as exc:
                     logger.error("Fallback contact save failed: %s", exc)
             else:
@@ -910,22 +915,24 @@ class HermesAdapter:
                 try:
                     if action == "clear":
                         clear_list(self.telegram_user_id, list_name)
-                        notes.append({
-                            "ru": f"🗑️ Список '{list_name}' очищен.",
-                            "uz": f"🗑️ '{list_name}' ro'yxati tozalandi.",
-                            "en": f"🗑️ Cleared your {list_name} list.",
-                        }.get(current_lang, f"🗑️ Cleared your {list_name} list."))
+                        if not self._confirmed(response, r"cleared", r"очищен", r"tozalandi"):
+                            notes.append({
+                                "ru": f"🗑️ Список '{list_name}' очищен.",
+                                "uz": f"🗑️ '{list_name}' ro'yxati tozalandi.",
+                                "en": f"🗑️ Cleared your {list_name} list.",
+                            }.get(current_lang, f"🗑️ Cleared your {list_name} list."))
                     elif action == "add" and items:
                         for item in items:
                             add_item(self.telegram_user_id, list_name, item)
-                        notes.append({
-                            "ru": f"📝 Добавил в список '{list_name}': {', '.join(items)}.",
-                            "uz": f"📝 '{list_name}' ro'yxatiga qo'shildi: {', '.join(items)}.",
-                            "en": f"📝 Added to your {list_name} list: {', '.join(items)}.",
-                        }.get(current_lang, f"📝 Added to your {list_name} list: {', '.join(items)}."))
+                        if not self._confirmed(response, r"added", r"добав", r"qo'shildi"):
+                            notes.append({
+                                "ru": f"📝 Добавил в список '{list_name}': {', '.join(items)}.",
+                                "uz": f"📝 '{list_name}' ro'yxatiga qo'shildi: {', '.join(items)}.",
+                                "en": f"📝 Added to your {list_name} list: {', '.join(items)}.",
+                            }.get(current_lang, f"📝 Added to your {list_name} list: {', '.join(items)}."))
                     elif action == "remove" and items:
                         removed = [item for item in items if remove_item(self.telegram_user_id, list_name, item)]
-                        if removed:
+                        if removed and not self._confirmed(response, r"removed", r"удал", r"o'chirildi"):
                             notes.append({
                                 "ru": f"🗑️ Удалил из списка '{list_name}': {', '.join(removed)}.",
                                 "uz": f"🗑️ '{list_name}' ro'yxatidan o'chirildi: {', '.join(removed)}.",
@@ -973,11 +980,12 @@ class HermesAdapter:
                 matches = [r for r in pending if score(r) > 0]
                 target = max(matches, key=lambda r: (score(r), r["id"])) if matches else (pending[-1] if len(pending) == 1 else None)
                 if target and cancel_reminder(self.telegram_user_id, target["id"]):
-                    notes.append({
-                        "ru": f"🗑️ Напоминание отменено: {target['text']}.",
-                        "uz": f"🗑️ Eslatma bekor qilindi: {target['text']}.",
-                        "en": f"🗑️ Cancelled reminder: {target['text']}.",
-                    }.get(current_lang, f"🗑️ Cancelled reminder: {target['text']}."))
+                    if not self._confirmed(response, r"cancelled", r"canceled", r"отменено", r"bekor qilindi"):
+                        notes.append({
+                            "ru": f"🗑️ Напоминание отменено: {target['text']}.",
+                            "uz": f"🗑️ Eslatma bekor qilindi: {target['text']}.",
+                            "en": f"🗑️ Cancelled reminder: {target['text']}.",
+                        }.get(current_lang, f"🗑️ Cancelled reminder: {target['text']}."))
                 elif pending:
                     notes.append({
                         "ru": "У вас несколько напоминаний — уточните, какое отменить.",
@@ -1048,7 +1056,7 @@ class HermesAdapter:
                     }.get(current_lang, f"⏰ Reminder set: {text} — in {when}.")
                     if re.search(r"which city|what city|where are you|hold on|just a moment|let me|каком городе|qaysi shahar", response, re.IGNORECASE):
                         response = note
-                    else:
+                    elif not self._confirmed(response, r"reminder set", r"timer set", r"напоминание установлено", r"eslatma o'rnatildi"):
                         notes.append(note)
                 except Exception as exc:
                     logger.error("Fallback reminder failed: %s", exc)
