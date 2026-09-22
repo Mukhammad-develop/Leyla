@@ -1135,6 +1135,12 @@ class HermesAdapter:
                 except Exception as exc:
                     logger.error("Failed to schedule reminder from response: %s", exc)
             response = re.sub(r"\[REMINDER:\s*\d+\s*\|\s*.+?\]", "", response).strip()
+            if rem_matches:
+                response = re.sub(
+                    r"(?im)^.*(?:you have no active reminders|активных напоминаний нет|faol eslatmalar yo['’]q).*(?:\n|$)",
+                    "",
+                    response,
+                ).strip()
 
             # Process [CANCEL_REMINDER: <id>] tags
             cancel_matches = re.findall(r"\[CANCEL_REMINDER:\s*(\d+)\]", response)
