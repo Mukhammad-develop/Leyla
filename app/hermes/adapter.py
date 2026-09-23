@@ -34,6 +34,7 @@ from app.expenses.manager import add_expense, get_recent_expenses, get_month_tot
 from app.calories.manager import log_food, get_day_total
 from app.events.manager import add_event, delete_event, get_upcoming_events
 from app.weather.forecast import get_weather
+from app.usage.tracker import get_pro_token_limit, get_pro_tokens_today, record_token_usage
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +137,28 @@ class HermesAdapter:
         self.memory_file = os.path.join(self.profile_dir, "memory.json")
         self.history_file = os.path.join(self.profile_dir, "history.json")
         self.model = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+        self.pro_model = os.environ.get("OPENROUTER_PRO_MODEL", "openai/gpt-4o")
+
+    def _model_for_user(self) -> str:
+        """Return the pro model until the user's daily pro-token budget is spent."""
+        limit = get_pro_token_limit()
+        if limit <= 0:
+            return self.model
+        return self.pro_model if get_pro_tokens_today(self.telegram_user_id) < limit else self.model
+
+    @staticmethod
+    def _usage_from_completion(completion, messages, reply: str) -> tuple[int, int, int]:
+        usage = getattr(completion, "usage", None)
+        prompt_tokens = getattr(usage, "prompt_tokens", None) if usage else None
+        completion_tokens = getattr(usage, "completion_tokens", None) if usage else None
+        total_tokens = getattr(usage, "total_tokens", None) if usage else None
+        if prompt_tokens is None:
+            prompt_tokens = sum(len(str(m.get("content") or "")) for m in messages) // 4
+        if completion_tokens is None:
+            completion_tokens = max(1, len(reply) // 4)
+        if total_tokens is None:
+            total_tokens = int(prompt_tokens) + int(completion_tokens)
+        return int(prompt_tokens), int(completion_tokens), int(total_tokens)
 
     # ---- User-local time helpers ------------------------------------------
 
@@ -1405,11 +1428,20 @@ class HermesAdapter:
         messages.append({"role": "user", "content": message})
 
         try:
+            model = self._model_for_user()
             completion = client.chat.completions.create(
-                model=self.model,
+                model=model,
                 messages=messages,
             )
             reply = completion.choices[0].message.content or ""
+            prompt_tokens, completion_tokens, total_tokens = self._usage_from_completion(completion, messages, reply)
+            record_token_usage(
+                self.telegram_user_id,
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+                used_pro_model=(model == self.pro_model),
+            )
 
             # Extract [REMEMBER: ...] tags and persist them
             for fact in re.findall(r"\[REMEMBER:\s*(.+?)\]", reply):

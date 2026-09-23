@@ -57,6 +57,12 @@ from app.usage.tracker import (  # noqa: E402
     is_limit_reached,
     get_daily_limit,
     set_daily_limit,
+    get_pro_token_limit,
+    set_pro_token_limit,
+    record_token_usage,
+    get_token_usage_today,
+    get_pro_tokens_today,
+    get_token_stats_today,
 )
 
 
@@ -213,6 +219,37 @@ class TestUsageTracker(unittest.TestCase):
             set_daily_limit(0)
         self.assertEqual(get_daily_limit(), 0)
 
+    def _clear_pro_limit_setting(self):
+        from app.database.db import get_db
+        with get_db() as conn:
+            conn.execute("DELETE FROM settings WHERE key = 'daily_pro_token_limit'")
+            conn.commit()
+
+    def test_pro_token_limit_env_and_admin_setting(self):
+        self._clear_pro_limit_setting()
+        os.environ["DAILY_PRO_TOKEN_LIMIT"] = "123"
+        try:
+            self.assertEqual(get_pro_token_limit(), 123)
+            set_pro_token_limit(456)
+            self.assertEqual(get_pro_token_limit(), 456)
+            set_pro_token_limit(0)
+            self.assertEqual(get_pro_token_limit(), 0)
+        finally:
+            self._clear_pro_limit_setting()
+            os.environ.pop("DAILY_PRO_TOKEN_LIMIT", None)
+
+    def test_record_token_usage_and_stats(self):
+        record_token_usage(741000, 10, 5, 15, used_pro_model=True)
+        record_token_usage(741000, 2, 3, 5, used_pro_model=False)
+        usage = get_token_usage_today(741000)
+        self.assertEqual(usage["total_tokens"], 20)
+        self.assertEqual(usage["pro_tokens"], 15)
+        self.assertEqual(get_pro_tokens_today(741000), 15)
+        stats = get_token_stats_today()
+        self.assertGreaterEqual(stats["total_tokens"], 20)
+        self.assertGreaterEqual(stats["pro_tokens"], 15)
+        self.assertGreaterEqual(stats["token_users"], 1)
+
 
 class TestUserSettings(unittest.TestCase):
     @classmethod
@@ -304,6 +341,19 @@ class TestAdapterTagProcessing(unittest.TestCase):
         prompt = adapter._get_system_prompt("en")
         self.assertIn("ONE specific next step", prompt)
         self.assertIn("Do NOT end with generic filler", prompt)
+
+    def test_model_tiering_by_pro_token_budget(self):
+        with mock.patch.dict(os.environ, {"OPENROUTER_MODEL": "base-model", "OPENROUTER_PRO_MODEL": "pro-model"}):
+            adapter = self._make_user(760020)
+            set_pro_token_limit(100)
+            try:
+                self.assertEqual(adapter._model_for_user(), "pro-model")
+                record_token_usage(760020, 90, 60, 150, used_pro_model=True)
+                self.assertEqual(adapter._model_for_user(), "base-model")
+                set_pro_token_limit(0)
+                self.assertEqual(adapter._model_for_user(), "base-model")
+            finally:
+                set_pro_token_limit(0)
 
     def test_shopping_list_survives_history_truncation(self):
         adapter = self._make_user(760001)

@@ -143,6 +143,17 @@ def init_db() -> None:
                 )
             """)
             conn.execute("""
+                CREATE TABLE IF NOT EXISTS token_usage_daily (
+                    telegram_user_id INTEGER NOT NULL,
+                    day              TEXT NOT NULL,
+                    prompt_tokens    INTEGER NOT NULL DEFAULT 0,
+                    completion_tokens INTEGER NOT NULL DEFAULT 0,
+                    total_tokens     INTEGER NOT NULL DEFAULT 0,
+                    pro_tokens       INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (telegram_user_id, day)
+                )
+            """)
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS settings (
                     key              TEXT PRIMARY KEY,
                     value            TEXT NOT NULL

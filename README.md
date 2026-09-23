@@ -129,6 +129,8 @@ PYTHONPATH=. python -m unittest discover tests/ -v
 | `OPENROUTER_MODEL` | — | `openai/gpt-4o-mini` | Chat model |
 | `OPENROUTER_VISION_MODEL` | — | `openai/gpt-4o` | Vision/OCR model |
 | `OPENROUTER_IMAGE_MODEL` | — | `google/gemini-2.5-flash-image` | Image generation model |
+| `OPENROUTER_PRO_MODEL` | — | `openai/gpt-4o` | Better chat model used until the user's daily pro-token budget is spent |
+| `DAILY_PRO_TOKEN_LIMIT` | — | `20000` | Per-user daily pro-model token budget; `0` disables the pro model. Admin panel overrides at runtime |
 | `ELEVENLABS_API_KEY` | — | — | Voice input (STT) and voice replies (TTS) |
 | `MUXLISA_API_KEY` | — | — | Uzbek TTS via Muxlisa (used for `uz` voice replies when set) |
 | `MUXLISA_SPEAKER` | — | `1` | Muxlisa speaker id: `0` female, `1` male |

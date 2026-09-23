@@ -47,6 +47,10 @@ from app.usage.tracker import (
     get_daily_limit,
     set_daily_limit,
     get_usage_today,
+    get_token_usage_today,
+    get_token_stats_today,
+    get_pro_token_limit,
+    set_pro_token_limit,
 )
 from app.contacts.manager import get_all_contacts
 from app.lists.manager import get_all_lists
@@ -519,6 +523,10 @@ def run_bot() -> None:
         limit = get_daily_limit()
         return f"{limit} msgs/user" if limit > 0 else "unlimited"
 
+    def _pro_limit_text() -> str:
+        limit = get_pro_token_limit()
+        return f"{limit} tokens/user" if limit > 0 else "disabled"
+
     def _admin_stats_text() -> str:
         uptime_s = int(time.time() - START_TIME)
         hours, remainder = divmod(uptime_s, 3600)
@@ -526,13 +534,21 @@ def run_bot() -> None:
         users = get_all_users()
         active_today = sum(1 for u in users if get_usage_today(u["telegram_user_id"]) > 0)
         scheduler_alive = any(t.name == "ReminderScheduler" and t.is_alive() for t in threading.enumerate())
+        token_stats = get_token_stats_today()
+        avg_all = round(token_stats["total_tokens"] / len(users), 1) if users else 0
+        pro_model = os.environ.get("OPENROUTER_PRO_MODEL", "openai/gpt-4o")
+        base_model = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
         return (
             "💚 <b>Bot health</b>\n"
             f"• Uptime: {hours}h {minutes}m {seconds}s\n"
             f"• Users: {len(users)} (active today: {active_today})\n"
             f"• Pending reminders: {count_pending()}\n"
             f"• Reminder scheduler: {'alive ✅' if scheduler_alive else 'DEAD ❌'}\n"
-            f"• Daily limit: {_limit_text()}"
+            f"• Daily limit: {_limit_text()}\n"
+            f"• Tokens today: {token_stats['total_tokens']} total "
+            f"(avg {avg_all}/user, {token_stats['avg_tokens_per_token_user']}/token-active user)\n"
+            f"• Pro tokens today: {token_stats['pro_tokens']} | pro budget: {_pro_limit_text()}\n"
+            f"• Models: pro <code>{pro_model}</code> | base <code>{base_model}</code>"
         )
 
     @bot.message_handler(commands=["health"])
@@ -553,9 +569,12 @@ def run_bot() -> None:
         )
         markup.row(
             InlineKeyboardButton("⚙️ Set daily limit", callback_data="admin_setlimit"),
-            InlineKeyboardButton("🔓 Remove limit", callback_data="admin_nolimit"),
+            InlineKeyboardButton("🧠 Set pro token budget", callback_data="admin_setprolimit"),
         )
-        markup.row(InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast"))
+        markup.row(
+            InlineKeyboardButton("🔓 Remove limit", callback_data="admin_nolimit"),
+            InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast"),
+        )
         return markup
 
     def _admin_users_text() -> str:
@@ -564,9 +583,11 @@ def run_bot() -> None:
         lines = [f"👥 <b>Users:</b> {len(users)} total, {active_today} active today", ""]
         lines.append("<b>Newest 10:</b>")
         for u in get_recent_users(10):
+            tokens = get_token_usage_today(u["telegram_user_id"])
             lines.append(
                 f"• <code>{u['telegram_user_id']}</code> | {u.get('language') or '–'} | "
-                f"today: {get_usage_today(u['telegram_user_id'])} msgs | since {(u.get('created_at') or '')[:10]}"
+                f"today: {get_usage_today(u['telegram_user_id'])} msgs / {tokens['total_tokens']} tok "
+                f"({tokens['pro_tokens']} pro) | since {(u.get('created_at') or '')[:10]}"
             )
         return "\n".join(lines)
 
@@ -577,7 +598,7 @@ def run_bot() -> None:
             return
         bot.send_message(
             message.chat.id,
-            f"🛠 <b>Admin panel</b>\nDaily limit: <b>{_limit_text()}</b>",
+            f"🛠 <b>Admin panel</b>\nDaily limit: <b>{_limit_text()}</b>\nPro token budget: <b>{_pro_limit_text()}</b>",
             parse_mode="HTML",
             reply_markup=_admin_panel_markup(),
         )
@@ -601,6 +622,14 @@ def run_bot() -> None:
                 parse_mode="HTML",
             )
             bot.register_next_step_handler(msg, process_set_limit)
+        elif data == "admin_setprolimit":
+            msg = bot.send_message(
+                call.message.chat.id,
+                f"🧠 Current pro token budget: <b>{_pro_limit_text()}</b>\n"
+                "Send the new daily pro-model token budget per user (0 = disable pro model). Type /cancel to abort.",
+                parse_mode="HTML",
+            )
+            bot.register_next_step_handler(msg, process_set_pro_limit)
         elif data == "admin_nolimit":
             set_daily_limit(0)
             bot.send_message(call.message.chat.id, "✅ Daily limit removed — users are now unlimited.")
@@ -629,6 +658,27 @@ def run_bot() -> None:
             bot.reply_to(message, "✅ Daily limit removed — users are now unlimited.")
         else:
             bot.reply_to(message, f"✅ Daily limit set to {new_limit} messages per user.")
+
+    def process_set_pro_limit(message):
+        if message.from_user.id != ADMIN_ID:
+            return
+        text = (message.text or "").strip()
+        if text == "/cancel":
+            bot.reply_to(message, "Cancelled.")
+            return
+        try:
+            new_limit = int(text)
+            if new_limit < 0:
+                raise ValueError
+        except ValueError:
+            msg = bot.reply_to(message, "❌ Please send a whole number (0 = disable pro model). Type /cancel to abort.")
+            bot.register_next_step_handler(msg, process_set_pro_limit)
+            return
+        set_pro_token_limit(new_limit)
+        if new_limit == 0:
+            bot.reply_to(message, "✅ Pro model disabled — all users are on the base model.")
+        else:
+            bot.reply_to(message, f"✅ Pro token budget set to {new_limit} tokens per user per day.")
 
     # ------------------------------------------------------------------
     # /start + language selection
